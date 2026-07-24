@@ -70,9 +70,16 @@ textarea,
   background: #3f3f46;
 }
 
-/* Dark mode Leaflet tile styling filter */
-.dark .leaflet-tile {
+/* Dark mode Leaflet tile styling filter ONLY for street mode maps */
+.dark .map-mode-streets .leaflet-tile {
   filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
+}
+
+/* Satellite mode maps are ALWAYS rendered in 100% natural, unfiltered constant colors regardless of app dark/light theme */
+.map-mode-satellite .leaflet-tile,
+.dark .map-mode-satellite .leaflet-tile {
+  filter: none !important;
+  -webkit-filter: none !important;
 }
 
 .dark .leaflet-container {

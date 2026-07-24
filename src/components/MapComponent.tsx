@@ -4,7 +4,7 @@ import { useEffect, useState, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Polyline, Popup, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import { Point } from '@/db/database';
-import { Loader2, Sliders, RotateCcw, Trash2 } from 'lucide-react';
+import { Loader2, Sliders, RotateCcw, Trash2, Layers, Globe } from 'lucide-react';
 
 // Helper to create custom SVG pins for main points
 const createSvgIcon = (color: string, label: string, isHighlighted: boolean) => {
@@ -205,6 +205,7 @@ export default function MapComponent({
   onClearViaPoints,
 }: MapComponentProps) {
   const [isMounted, setIsMounted] = useState(false);
+  const [mapTileStyle, setMapTileStyle] = useState<'streets' | 'satellite'>('streets');
 
   useEffect(() => {
     setIsMounted(true);
@@ -258,7 +259,33 @@ export default function MapComponent({
   }
 
   return (
-    <div className="w-full h-full relative">
+    <div className={`w-full h-full relative ${mapTileStyle === 'satellite' ? 'map-mode-satellite' : 'map-mode-streets'}`}>
+      {/* Map Tile Style Switcher (Top-Left Corner next to Leaflet zoom controls) */}
+      <div className="absolute top-3.5 left-14 z-[1000] flex items-center bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md p-1 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-xl select-none">
+        <button
+          type="button"
+          onClick={() => setMapTileStyle('streets')}
+          className={`px-2.5 py-1.5 rounded-lg text-xs font-extrabold transition flex items-center gap-1.5 cursor-pointer ${mapTileStyle === 'streets'
+            ? 'bg-emerald-600 text-white shadow-md'
+            : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+            }`}
+        >
+          <Layers className="w-3.5 h-3.5" />
+          <span>Ulica</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setMapTileStyle('satellite')}
+          className={`px-2.5 py-1.5 rounded-lg text-xs font-extrabold transition flex items-center gap-1.5 cursor-pointer ${mapTileStyle === 'satellite'
+            ? 'bg-emerald-600 text-white shadow-md'
+            : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+            }`}
+        >
+          <Globe className="w-3.5 h-3.5" />
+          <span>Satelita</span>
+        </button>
+      </div>
+
       {/* Floating Route Edit Controls Header on Map (Bottom-Left Corner) */}
       {validActivePoints.length >= 2 && onToggleRouteEditMode && (
         <div className="absolute bottom-6 left-6 z-[1000] flex items-center gap-2 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md p-2 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-2xl select-none">
@@ -266,8 +293,8 @@ export default function MapComponent({
             type="button"
             onClick={onToggleRouteEditMode}
             className={`px-3 py-2 rounded-lg text-xs font-extrabold transition flex items-center gap-2 cursor-pointer ${isRouteEditMode
-                ? 'bg-amber-500 text-white shadow-lg ring-2 ring-amber-400/60'
-                : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+              ? 'bg-amber-500 text-white shadow-lg ring-2 ring-amber-400/60'
+              : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 hover:bg-zinc-200 dark:hover:bg-zinc-700'
               }`}
           >
             <Sliders className="w-4 h-4" />
@@ -294,10 +321,40 @@ export default function MapComponent({
         style={{ height: '100%', width: '100%', zIndex: 0 }}
       >
         <TileLayer
-          key="osm-tile-layer"
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          key={`tile-layer-${mapTileStyle}`}
+          className={mapTileStyle === 'satellite' ? 'leaflet-satellite-tile' : ''}
+          url={
+            mapTileStyle === 'satellite'
+              ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+              : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+          }
+          attribution={
+            mapTileStyle === 'satellite'
+              ? 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and GIS User Community'
+              : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          }
+          maxZoom={19}
         />
+
+        {/* Hybrid Satellite Overlay: Street Names, Roads and City Boundaries */}
+        {mapTileStyle === 'satellite' && (
+          <TileLayer
+            key="satellite-transportation-overlay"
+            className="leaflet-satellite-tile"
+            url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}"
+            minZoom={11}
+            maxZoom={19}
+          />
+        )}
+        {mapTileStyle === 'satellite' && (
+          <TileLayer
+            key="satellite-boundaries-overlay"
+            className="leaflet-satellite-tile"
+            url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+            minZoom={6}
+            maxZoom={19}
+          />
+        )}
 
         <MapInvalidateSize isMapMaximized={isMapMaximized} />
         <MapEvents
