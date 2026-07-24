@@ -45,7 +45,8 @@ import {
   Monitor,
   GripVertical,
   ChevronDown,
-  Check
+  Check,
+  RotateCcw
 } from 'lucide-react';
 
 // Dynamic import of MapComponent with SSR disabled to prevent Leaflet errors
@@ -286,16 +287,19 @@ export default function Dashboard() {
   const [isMapMaximized, setIsMapMaximized] = useState(false);
 
   // Drag and Drop live-swapping state
-  const [activeDragId, setActiveDragId] = useState<number | null>(null);
+  const [activeDragIndex, setActiveDragIndex] = useState<number | null>(null);
   const [activeSavedDragId, setActiveSavedDragId] = useState<number | null>(null);
 
   // Via-points (route corrections) state
   const [isRouteEditMode, setIsRouteEditMode] = useState(false);
   const [viaPoints, setViaPoints] = useState<[number, number][]>([]);
 
-  // Route edit mode is always OFF by default whenever route selection or active folder changes
+  // Route edit mode & via-points are automatically reset whenever active route or active points selection changes
   useEffect(() => {
     setIsRouteEditMode(false);
+    if (activePointIds.length < 2) {
+      setViaPoints([]);
+    }
   }, [activePointIds, activeRouteId]);
 
   const handleToggleRouteEditMode = () => {
@@ -402,9 +406,35 @@ export default function Dashboard() {
     showStatusMessage('Wyczyszczono aktywny plan trasy.', 'success');
   };
 
-  // Keyboard Shortcuts (Ctrl+F for search, Esc for close modals and clear route)
+  // Check if current active route has a return leg back to start
+  const isHasReturnLeg = useMemo(() => {
+    return activePointIds.length > 1 && activePointIds[activePointIds.length - 1] === activePointIds[0];
+  }, [activePointIds]);
+
+  // Toggle return to start (append/remove start point at the end of route)
+  const handleToggleReturnToStart = () => {
+    if (activePointIds.length === 0) {
+      showStatusMessage('Dodaj najpierw przynajmniej jeden punkt do trasy.', 'error');
+      return;
+    }
+    const firstId = activePointIds[0];
+    const isCurrentlyLoop = activePointIds.length > 1 && activePointIds[activePointIds.length - 1] === firstId;
+
+    if (isCurrentlyLoop) {
+      setActivePointIds(prev => prev.slice(0, prev.length - 1));
+      showStatusMessage('Usunięto powrót do punktu startowego z trasy.', 'success');
+    } else {
+      setActivePointIds(prev => [...prev, firstId]);
+      showStatusMessage('Dodano punkt startowy na koniec trasy jako przystanek powrotny.', 'success');
+    }
+  };
+
+  // Keyboard Shortcuts (Ctrl+F for search, Ctrl+A to select all points, Esc for close modals and clear route)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const activeTag = document.activeElement?.tagName.toUpperCase();
+      const isTypingInInput = activeTag === 'INPUT' || activeTag === 'TEXTAREA' || (document.activeElement as HTMLElement)?.isContentEditable;
+
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         setActiveTab('points');
@@ -412,6 +442,16 @@ export default function Dashboard() {
           const el = document.getElementById('desktop-main-search-input');
           if (el) el.focus();
         }, 50);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !isTypingInInput) {
+        e.preventDefault();
+        const availablePoints = points.filter(p => activeRouteId === null || p.routeId === activeRouteId);
+        const allIds = availablePoints.map(p => p.id).filter((id): id is number => id !== undefined);
+        if (allIds.length === 0) {
+          showStatusMessage('Brak zapisanych lokalizacji do zaznaczenia.', 'error');
+        } else {
+          setActivePointIds(allIds);
+          showStatusMessage(`Zaznaczono wszystkie lokalizacje (${allIds.length}).`, 'success');
+        }
       } else if (e.key === 'Escape') {
         setEditingPoint(null);
         setDeletingPoint(null);
@@ -426,7 +466,7 @@ export default function Dashboard() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [points, activeRouteId]);
 
   // Photon Address Search for Edit Modal
   const handleEditSearchAddress = async (e: React.FormEvent) => {
@@ -768,7 +808,7 @@ export default function Dashboard() {
 
   // Fetch OSRM high-fidelity road polyline (deferred during live dragging for 60fps fluid performance)
   useEffect(() => {
-    if (activeDragId !== null) return;
+    if (activeDragIndex !== null) return;
 
     const fetchRouteLine = async () => {
       if (activePointIds.length < 2) {
@@ -820,7 +860,7 @@ export default function Dashboard() {
     };
 
     fetchRouteLine();
-  }, [activePointIds, points, activeDragId, viaPoints]);
+  }, [activePointIds, points, activeDragIndex, viaPoints]);
 
   // Real-time Distance Summing & Step Distances from IndexedDB
   useEffect(() => {
@@ -1041,6 +1081,8 @@ export default function Dashboard() {
   // Move item up / down helpers
   const handleMoveUp = (index: number) => {
     if (index === 0) return;
+    if (isHasReturnLeg && (index === 1 || index === activePointIds.length - 1)) return;
+
     setActivePointIds(prev => {
       const updated = [...prev];
       const temp = updated[index];
@@ -1052,6 +1094,8 @@ export default function Dashboard() {
 
   const handleMoveDown = (index: number) => {
     if (index === activePointIds.length - 1) return;
+    if (isHasReturnLeg && (index === 0 || index === activePointIds.length - 2)) return;
+
     setActivePointIds(prev => {
       const updated = [...prev];
       const temp = updated[index];
@@ -1190,24 +1234,27 @@ export default function Dashboard() {
   };
 
   // Live-swapping Pointer Drag and Drop for active route plan
-  const handlePointerDownDrag = (e: React.PointerEvent, id: number) => {
+  const handlePointerDownDrag = (e: React.PointerEvent, index: number) => {
     if (e.button !== 0) return;
-    setActiveDragId(id);
+    if (isHasReturnLeg && (index === 0 || index === activePointIds.length - 1)) return;
+    setActiveDragIndex(index);
   };
 
-  const handlePointerEnterHover = (hoverId: number) => {
-    if (activeDragId === null || activeDragId === hoverId) return;
+  const handlePointerEnterHover = (hoverIndex: number) => {
+    if (activeDragIndex === null || activeDragIndex === hoverIndex) return;
+    if (isHasReturnLeg && (hoverIndex === 0 || hoverIndex === activePointIds.length - 1)) return;
+    if (isHasReturnLeg && (activeDragIndex === 0 || activeDragIndex === activePointIds.length - 1)) return;
 
     setActivePointIds(prev => {
-      const fromIdx = prev.indexOf(activeDragId);
-      const toIdx = prev.indexOf(hoverId);
-      if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return prev;
+      if (activeDragIndex < 0 || activeDragIndex >= prev.length || hoverIndex < 0 || hoverIndex >= prev.length) return prev;
 
       const updated = [...prev];
-      const [moved] = updated.splice(fromIdx, 1);
-      updated.splice(toIdx, 0, moved);
+      const [moved] = updated.splice(activeDragIndex, 1);
+      updated.splice(hoverIndex, 0, moved);
       return updated;
     });
+
+    setActiveDragIndex(hoverIndex);
   };
 
   // Live-swapping Pointer Drag and Drop for saved points list in database
@@ -1243,7 +1290,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     const handleGlobalPointerUp = () => {
-      setActiveDragId(null);
+      setActiveDragIndex(null);
       setActiveSavedDragId(null);
     };
 
@@ -1885,6 +1932,19 @@ export default function Dashboard() {
                       </div>
                       <div className="flex items-center gap-1.5">
                         <button
+                          type="button"
+                          onClick={handleToggleReturnToStart}
+                          title="Dodaj lub usuń powrót do punktu startowego na końcu trasy"
+                          className={`text-[11px] font-bold px-2.5 py-1 rounded-lg transition flex items-center gap-1 cursor-pointer ${
+                            isHasReturnLeg
+                              ? 'bg-emerald-600 text-white shadow-md'
+                              : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20'
+                          }`}
+                        >
+                          <RotateCcw className={`w-3 h-3 ${isHasReturnLeg ? 'rotate-180 transition-transform' : ''}`} />
+                          <span>{isHasReturnLeg ? 'Pętla: WŁ' : 'Powrót do startu'}</span>
+                        </button>
+                        <button
                           onClick={handleToggleRouteEditMode}
                           className={`text-[11px] font-bold px-2.5 py-1 rounded-lg transition flex items-center gap-1 cursor-pointer ${isRouteEditMode
                               ? 'bg-amber-500 text-white shadow-md'
@@ -1908,6 +1968,11 @@ export default function Dashboard() {
                         if (point.id === undefined) return null;
                         const isFirst = index === 0;
                         const isLast = index === activePointIds.length - 1;
+                        const isReturnStop = index > 0 && point.id === activePointIds[0] && isLast;
+                        const isLockedInLoop = isHasReturnLeg && (isFirst || isLast);
+
+                        const isMoveUpDisabled = isFirst || (isHasReturnLeg && (index === 1 || isLast));
+                        const isMoveDownDisabled = isLast || (isHasReturnLeg && (isFirst || index === activePointIds.length - 2));
 
                         let nextStepKm: number | undefined = undefined;
                         if (!isLast) {
@@ -1915,20 +1980,22 @@ export default function Dashboard() {
                           nextStepKm = stepDistances[`${point.id}-${nextPointId}`];
                         }
 
-                        const isBeingDragged = activeDragId === point.id;
+                        const isBeingDragged = activeDragIndex === index;
 
                         return (
                           <div
-                            key={`active-${point.id}`}
-                            onPointerEnter={() => handlePointerEnterHover(point.id!)}
+                            key={`active-${index}-${point.id}`}
+                            onPointerEnter={() => handlePointerEnterHover(index)}
                             className={`space-y-1 transition-all duration-150 ease-out rounded-xl select-none ${isBeingDragged
                                 ? 'relative z-20 ring-2 ring-emerald-500/90 shadow-lg bg-emerald-500/10 dark:bg-emerald-950/50'
                                 : ''
                               }`}
                           >
-                            <div className={`flex items-center justify-between border rounded-xl p-2.5 transition-colors ${isBeingDragged
-                                ? 'bg-emerald-500/15 border-emerald-500 dark:border-emerald-500/80'
-                                : 'bg-zinc-50 dark:bg-zinc-950/40 border-zinc-200 dark:border-zinc-800 hover:border-emerald-500/40'
+                            <div className={`flex items-center justify-between border rounded-xl p-2.5 transition-colors ${isReturnStop
+                                ? 'bg-emerald-500/10 border-emerald-500/40 dark:bg-emerald-950/30'
+                                : isBeingDragged
+                                  ? 'bg-emerald-500/15 border-emerald-500 dark:border-emerald-500/80'
+                                  : 'bg-zinc-50 dark:bg-zinc-950/40 border-zinc-200 dark:border-zinc-800 hover:border-emerald-500/40'
                               }`}>
                               <div className="flex items-center gap-2 min-w-0 flex-1">
                                 {/* Drag Handle */}
@@ -1936,37 +2003,47 @@ export default function Dashboard() {
                                   onPointerDown={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    handlePointerDownDrag(e, point.id!);
+                                    if (!isLockedInLoop) {
+                                      handlePointerDownDrag(e, index);
+                                    }
                                   }}
-                                  title="Przytrzymaj i przeciągnij myszą w górę/dół"
-                                  className="p-1 text-zinc-400 hover:text-emerald-500 cursor-grab active:cursor-grabbing touch-none select-none transition-colors"
+                                  title={isLockedInLoop ? "Przystanek zablokowany w trybie pętli" : "Przytrzymaj i przeciągnij myszą w górę/dół"}
+                                  className={`p-1 select-none transition-colors ${isLockedInLoop
+                                      ? 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed opacity-40'
+                                      : 'text-zinc-400 hover:text-emerald-500 cursor-grab active:cursor-grabbing touch-none'
+                                    }`}
                                 >
                                   <GripVertical className="w-4 h-4 flex-shrink-0" />
                                 </div>
 
-                                <span className={`w-5 h-5 rounded-full text-white text-xs font-black flex items-center justify-center flex-shrink-0 transition-colors ${isBeingDragged ? 'bg-emerald-600' : 'bg-emerald-500'
+                                <span className={`w-5 h-5 rounded-full text-white text-xs font-black flex items-center justify-center flex-shrink-0 transition-colors ${isReturnStop ? 'bg-emerald-600 ring-2 ring-emerald-400/40' : isBeingDragged ? 'bg-emerald-600' : 'bg-emerald-500'
                                   }`}>
                                   {index + 1}
                                 </span>
                                 <span className="text-sm font-bold text-zinc-800 dark:text-zinc-100 truncate">
                                   {point.name}
                                 </span>
+                                {isReturnStop && (
+                                  <span className="text-[10px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-bold px-1.5 py-0.2 rounded border border-emerald-500/20 flex-shrink-0">
+                                    🔄 Powrót
+                                  </span>
+                                )}
                               </div>
 
                               <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                                 <button
                                   onClick={() => handleMoveUp(index)}
-                                  disabled={isFirst}
-                                  title="Przesuń wyżej"
-                                  className="p-1 text-zinc-400 hover:text-emerald-500 disabled:opacity-20 rounded transition cursor-pointer"
+                                  disabled={isMoveUpDisabled}
+                                  title={isMoveUpDisabled ? "Przesuwanie w górę zablokowane" : "Przesuń wyżej"}
+                                  className="p-1 text-zinc-400 hover:text-emerald-500 disabled:opacity-20 disabled:cursor-not-allowed rounded transition cursor-pointer"
                                 >
                                   <ArrowUp className="w-4 h-4" />
                                 </button>
                                 <button
                                   onClick={() => handleMoveDown(index)}
-                                  disabled={isLast}
-                                  title="Przesuń niżej"
-                                  className="p-1 text-zinc-400 hover:text-emerald-500 disabled:opacity-20 rounded transition cursor-pointer"
+                                  disabled={isMoveDownDisabled}
+                                  title={isMoveDownDisabled ? "Przesuwanie w dół zablokowane" : "Przesuń niżej"}
+                                  className="p-1 text-zinc-400 hover:text-emerald-500 disabled:opacity-20 disabled:cursor-not-allowed rounded transition cursor-pointer"
                                 >
                                   <ArrowDown className="w-4 h-4" />
                                 </button>
@@ -2146,7 +2223,7 @@ export default function Dashboard() {
             routeCoordinates={routeCoordinates}
             onMapClick={handleMapClick}
             isMapMaximized={isMapMaximized}
-            isDragging={activeDragId !== null}
+            isDragging={activeDragIndex !== null}
             isRouteEditMode={isRouteEditMode}
             onToggleRouteEditMode={handleToggleRouteEditMode}
             viaPoints={viaPoints}
@@ -2175,6 +2252,7 @@ export default function Dashboard() {
         <div className="hidden md:flex items-center gap-2 text-zinc-400">
           <span>Skróty:</span>
           <kbd className="px-1.5 py-0.2 bg-zinc-200 dark:bg-zinc-800 rounded text-[10px] font-mono">Ctrl+F</kbd> Szukaj |
+          <kbd className="px-1.5 py-0.2 bg-zinc-200 dark:bg-zinc-800 rounded text-[10px] font-mono">Ctrl+A</kbd> Zaznacz wszystkie |
           <kbd className="px-1.5 py-0.2 bg-zinc-200 dark:bg-zinc-800 rounded text-[10px] font-mono">Esc</kbd> Zamknij / Wyczyść plan
         </div>
 

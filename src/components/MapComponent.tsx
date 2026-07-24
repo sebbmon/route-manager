@@ -96,19 +96,24 @@ function MapFitBounds({ activePoints, isDragging }: { activePoints: Point[]; isD
   useEffect(() => {
     if (isDragging) return;
     if (validActivePoints.length > 0 && map && (map as any)._container) {
-      try {
-        const bounds = L.latLngBounds(validActivePoints.map(p => [p.lat, p.lng]));
-        if (bounds.isValid()) {
-          map.fitBounds(bounds, {
-            padding: [50, 50],
-            maxZoom: 14,
-            animate: true,
-            duration: 1,
-          });
+      const raf = requestAnimationFrame(() => {
+        try {
+          if (map && (map as any)._container) {
+            const bounds = L.latLngBounds(validActivePoints.map(p => [p.lat, p.lng]));
+            if (bounds.isValid()) {
+              map.fitBounds(bounds, {
+                padding: [50, 50],
+                maxZoom: 14,
+                animate: true,
+                duration: 1,
+              });
+            }
+          }
+        } catch (err) {
+          console.error('Leaflet fitBounds error:', err);
         }
-      } catch (err) {
-        console.error('Leaflet fitBounds error:', err);
-      }
+      });
+      return () => cancelAnimationFrame(raf);
     }
   }, [activeSetKey, map, isDragging, validActivePoints]);
 
@@ -223,10 +228,21 @@ export default function MapComponent({
   }, [routeCoordinates]);
 
   const validViaPoints = useMemo(() => {
+    if (validActivePoints.length < 2) return [];
     return (viaPoints || []).filter(
       v => Array.isArray(v) && v.length === 2 && typeof v[0] === 'number' && !isNaN(v[0]) && typeof v[1] === 'number' && !isNaN(v[1])
     );
-  }, [viaPoints]);
+  }, [viaPoints, validActivePoints]);
+
+  const activePolylineCoords = useMemo<[number, number][]>(() => {
+    if (validRouteCoordinates.length > 0) {
+      return validRouteCoordinates;
+    }
+    if (validActivePoints.length >= 2) {
+      return validActivePoints.map(p => [p.lat, p.lng] as [number, number]);
+    }
+    return [];
+  }, [validRouteCoordinates, validActivePoints]);
 
   const getActiveIndex = (pointId: number) => {
     return validActivePoints.findIndex(p => p.id === pointId);
@@ -278,6 +294,7 @@ export default function MapComponent({
         style={{ height: '100%', width: '100%', zIndex: 0 }}
       >
         <TileLayer
+          key="osm-tile-layer"
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
@@ -299,7 +316,7 @@ export default function MapComponent({
 
           return (
             <CustomMarker
-              key={point.id}
+              key={`marker-point-${point.id}`}
               point={point}
               isActive={isActive}
               label={label}
@@ -313,9 +330,10 @@ export default function MapComponent({
             key={`via-${idx}-${via[0]}-${via[1]}`}
             position={[via[0], via[1]]}
             icon={createViaIcon(idx)}
-            draggable={true}
+            draggable={isRouteEditMode}
             eventHandlers={{
               dragend: (e) => {
+                if (!isRouteEditMode) return;
                 const marker = e.target;
                 const { lat, lng } = marker.getLatLng();
                 if (onUpdateViaPoint) {
@@ -324,18 +342,35 @@ export default function MapComponent({
               },
             }}
           >
-            <Popup>
-              <div className="p-1 space-y-2 text-center min-w-[140px]">
+            <Popup key={`via-popup-${idx}`}>
+              <div
+                className="p-1 space-y-2 text-center min-w-[140px]"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (e.nativeEvent) {
+                    e.nativeEvent.stopImmediatePropagation();
+                    e.nativeEvent.stopPropagation();
+                  }
+                }}
+              >
                 <p className="text-xs font-bold text-amber-600 dark:text-amber-400">
                   Korekta trasowania #{idx + 1}
                 </p>
                 <p className="text-[10px] text-zinc-500">
-                  Możesz przeciągać ten punkt po mapie
+                  {isRouteEditMode ? 'Możesz przeciągać ten punkt po mapie' : 'Włącz tryb edycji trasy, aby przesuwać/usuwać.'}
                 </p>
-                {onRemoveViaPoint && (
+                {isRouteEditMode && onRemoveViaPoint && (
                   <button
                     type="button"
-                    onClick={() => onRemoveViaPoint(idx)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      if (e.nativeEvent) {
+                        e.nativeEvent.stopImmediatePropagation();
+                        e.nativeEvent.stopPropagation();
+                      }
+                      onRemoveViaPoint(idx);
+                    }}
                     className="w-full py-1 px-2 bg-rose-500 text-white rounded text-[11px] font-bold hover:bg-rose-600 transition flex items-center justify-center gap-1 cursor-pointer"
                   >
                     <Trash2 className="w-3 h-3" />
@@ -347,62 +382,44 @@ export default function MapComponent({
           </Marker>
         ))}
 
-        {/* Driving Route Polyline */}
-        {validRouteCoordinates.length > 0 ? (
+        {/* Persistent Driving / Fallback Route Polyline */}
+        {activePolylineCoords.length > 0 && (
           <>
             <Polyline
-              positions={validRouteCoordinates}
+              key="main-route-line-outer"
+              positions={activePolylineCoords}
               color={isRouteEditMode ? "#d97706" : "#1e3a8a"}
-              weight={10}
-              opacity={0.5}
+              weight={validRouteCoordinates.length > 0 ? 10 : 8}
+              opacity={validRouteCoordinates.length > 0 ? 0.5 : 0.4}
+              dashArray={validRouteCoordinates.length > 0 ? undefined : "8, 10"}
               lineCap="round"
               lineJoin="round"
               eventHandlers={{
                 click: (e) => {
-                  if (onAddViaPoint) {
+                  if (isRouteEditMode && onAddViaPoint) {
                     onAddViaPoint(e.latlng.lat, e.latlng.lng);
                   }
                 },
               }}
             />
             <Polyline
-              positions={validRouteCoordinates}
-              color={isRouteEditMode ? "#f59e0b" : "#4285f4"}
-              weight={6}
-              opacity={1.0}
+              key="main-route-line-inner"
+              positions={activePolylineCoords}
+              color={isRouteEditMode ? "#f59e0b" : validRouteCoordinates.length > 0 ? "#4285f4" : "#60a5fa"}
+              weight={validRouteCoordinates.length > 0 ? 6 : 4}
+              opacity={validRouteCoordinates.length > 0 ? 1.0 : 0.95}
+              dashArray={validRouteCoordinates.length > 0 ? undefined : "8, 10"}
               lineCap="round"
               lineJoin="round"
               eventHandlers={{
                 click: (e) => {
-                  if (onAddViaPoint) {
+                  if (isRouteEditMode && onAddViaPoint) {
                     onAddViaPoint(e.latlng.lat, e.latlng.lng);
                   }
                 },
               }}
             />
           </>
-        ) : (
-          validActivePoints.length >= 2 && (
-            <>
-              <Polyline
-                positions={validActivePoints.map(p => [p.lat, p.lng])}
-                color="#1e3a8a"
-                weight={8}
-                opacity={0.4}
-                lineCap="round"
-                lineJoin="round"
-              />
-              <Polyline
-                positions={validActivePoints.map(p => [p.lat, p.lng])}
-                color="#60a5fa"
-                weight={4}
-                dashArray="8, 10"
-                opacity={0.95}
-                lineCap="round"
-                lineJoin="round"
-              />
-            </>
-          )
         )}
       </MapContainer>
     </div>
