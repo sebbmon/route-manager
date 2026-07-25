@@ -1,10 +1,46 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Polyline, Popup, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import { Point } from '@/db/database';
-import { Loader2, Sliders, RotateCcw, Trash2, Layers, Globe } from 'lucide-react';
+import { Loader2, Sliders, RotateCcw, Trash2, Layers, Globe, Move } from 'lucide-react';
+
+// Helper icon when hovering over polyline (rubberband handle)
+const createRubberbandHandleIcon = () => {
+  const html = `
+    <div class="relative flex items-center justify-center pointer-events-none">
+      <span class="absolute w-6 h-6 rounded-full bg-amber-400/40 animate-ping"></span>
+      <div class="w-4 h-4 bg-amber-500 rounded-full border-2 border-white shadow-lg flex items-center justify-center">
+        <div class="w-1.5 h-1.5 bg-white rounded-full"></div>
+      </div>
+    </div>
+  `;
+  return L.divIcon({
+    html,
+    className: 'custom-rubberband-handle',
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+  });
+};
+
+// Helper icon while dragging route line
+const createRubberbandDraggingIcon = () => {
+  const html = `
+    <div class="relative flex items-center justify-center pointer-events-none">
+      <div class="px-2.5 py-1 bg-amber-500 text-white text-[10px] font-black rounded-full shadow-2xl border border-white flex items-center gap-1">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3"/><path d="M9 5l3-3 3 3"/><path d="M19 9l3 3-3 3"/><path d="M9 19l3 3 3-3"/><path d="M2 12h20"/><path d="M12 2v20"/></svg>
+        <span>Dodaj korektę</span>
+      </div>
+    </div>
+  `;
+  return L.divIcon({
+    html,
+    className: 'custom-rubberband-dragging',
+    iconSize: [96, 24],
+    iconAnchor: [48, 12],
+  });
+};
 
 // Helper to create custom SVG pins for main points
 const createSvgIcon = (color: string, label: string, isHighlighted: boolean) => {
@@ -136,6 +172,126 @@ function MapInvalidateSize({ isMapMaximized }: { isMapMaximized?: boolean }) {
     return () => clearTimeout(timer);
   }, [map, isMapMaximized]);
   return null;
+}
+
+// Component for dragging the route line (Rubberbanding)
+function RouteRubberbandHandler({
+  isRouteEditMode,
+  activePolylineCoords,
+  onAddViaPoint,
+}: {
+  isRouteEditMode?: boolean;
+  activePolylineCoords: [number, number][];
+  onAddViaPoint?: (lat: number, lng: number) => void;
+}) {
+  const map = useMap();
+  const [hoverPos, setHoverPos] = useState<[number, number] | null>(null);
+  const [dragStartPos, setDragStartPos] = useState<[number, number] | null>(null);
+  const [dragCurrentPos, setDragCurrentPos] = useState<[number, number] | null>(null);
+  const isDraggingRef = useRef(false);
+
+  useMapEvents({
+    mousemove(e) {
+      if (isDraggingRef.current) {
+        setDragCurrentPos([e.latlng.lat, e.latlng.lng]);
+      }
+    },
+    mouseup(e) {
+      if (isDraggingRef.current) {
+        isDraggingRef.current = false;
+        try {
+          map.dragging.enable();
+        } catch (err) {
+          console.error(err);
+        }
+        const dropLat = e.latlng.lat;
+        const dropLng = e.latlng.lng;
+        setDragStartPos(null);
+        setDragCurrentPos(null);
+        setHoverPos(null);
+        if (onAddViaPoint) {
+          onAddViaPoint(dropLat, dropLng);
+        }
+      }
+    },
+  });
+
+  if (!isRouteEditMode || activePolylineCoords.length < 2) return null;
+
+  return (
+    <>
+      {/* Hitbox Polyline for catching hover/drag anywhere on the route line */}
+      <Polyline
+        positions={activePolylineCoords}
+        color="#f59e0b"
+        weight={26}
+        opacity={0.001}
+        eventHandlers={{
+          mouseover: (e) => {
+            if (!isDraggingRef.current) {
+              setHoverPos([e.latlng.lat, e.latlng.lng]);
+            }
+          },
+          mousemove: (e) => {
+            if (!isDraggingRef.current) {
+              setHoverPos([e.latlng.lat, e.latlng.lng]);
+            }
+          },
+          mouseout: () => {
+            if (!isDraggingRef.current) {
+              setHoverPos(null);
+            }
+          },
+          mousedown: (e) => {
+            if (isRouteEditMode) {
+              if (e.originalEvent) {
+                L.DomEvent.stopPropagation(e.originalEvent);
+              }
+              isDraggingRef.current = true;
+              try {
+                map.dragging.disable();
+              } catch (err) {
+                console.error(err);
+              }
+              const start: [number, number] = [e.latlng.lat, e.latlng.lng];
+              setDragStartPos(start);
+              setDragCurrentPos(start);
+            }
+          },
+        }}
+      />
+
+      {/* Hover handle marker on polyline */}
+      {hoverPos && !dragStartPos && (
+        <Marker
+          key="rubberband-hover-marker"
+          position={hoverPos}
+          icon={createRubberbandHandleIcon()}
+          interactive={false}
+        />
+      )}
+
+      {/* Rubberband live line preview while dragging line */}
+      {dragStartPos && dragCurrentPos && (
+        <>
+          <Polyline
+            key="rubberband-drag-line"
+            positions={[dragStartPos, dragCurrentPos]}
+            color="#f59e0b"
+            weight={4}
+            dashArray="6, 8"
+            opacity={0.95}
+          />
+          <Marker
+            key="rubberband-drag-marker"
+            position={dragCurrentPos}
+            icon={createRubberbandDraggingIcon()}
+            interactive={false}
+          />
+        </>
+      )}
+    </>
+  );
 }
 
 interface MapComponentProps {
@@ -298,7 +454,7 @@ export default function MapComponent({
               }`}
           >
             <Sliders className="w-4 h-4" />
-            <span>{isRouteEditMode ? 'Tryb edycji: WŁĄCZONY (klikaj na mapie/linii)' : 'Koryguj trasę na mapie'}</span>
+            <span>{isRouteEditMode ? 'Tryb edycji: Przeciągaj linię trasy myszką lub punkty K1, K2...' : 'Koryguj trasę na mapie (Drag & Drop)'}</span>
           </button>
           {validViaPoints.length > 0 && onClearViaPoints && (
             <button
@@ -321,7 +477,7 @@ export default function MapComponent({
         style={{ height: '100%', width: '100%', zIndex: 0 }}
       >
         <TileLayer
-          key={`tile-layer-${mapTileStyle}`}
+          key="main-tile-layer"
           className={mapTileStyle === 'satellite' ? 'leaflet-satellite-tile' : ''}
           url={
             mapTileStyle === 'satellite'
@@ -364,6 +520,12 @@ export default function MapComponent({
         />
         <MapFitBounds activePoints={validActivePoints} isDragging={isDragging} />
 
+        <RouteRubberbandHandler
+          isRouteEditMode={isRouteEditMode}
+          activePolylineCoords={activePolylineCoords}
+          onAddViaPoint={onAddViaPoint}
+        />
+
         {/* All Points Markers */}
         {validPoints.map(point => {
           if (point.id === undefined) return null;
@@ -384,7 +546,7 @@ export default function MapComponent({
         {/* Draggable Route Via-Points (Corrections) */}
         {validViaPoints.map((via, idx) => (
           <Marker
-            key={`via-${idx}-${via[0]}-${via[1]}`}
+            key={`via-point-marker-${idx}`}
             position={[via[0], via[1]]}
             icon={createViaIcon(idx)}
             draggable={isRouteEditMode}

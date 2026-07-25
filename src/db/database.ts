@@ -123,3 +123,94 @@ export async function updateDistanceMatrix(): Promise<void> {
     throw error;
   }
 }
+
+export interface DatabaseBackupData {
+  version: number;
+  appName: string;
+  exportedAt: string;
+  points: Point[];
+  routes: SavedRoute[];
+  routes_history: RouteHistory[];
+  distances?: Distance[];
+}
+
+/**
+ * Export all database tables to a structured JSON object
+ */
+export async function exportDatabaseToJSON(): Promise<DatabaseBackupData> {
+  const points = await db.points.toArray();
+  const routes = await db.routes.toArray();
+  const routes_history = await db.routes_history.toArray();
+  const distances = await db.distances.toArray();
+
+  return {
+    version: 2,
+    appName: 'RoutePlanner',
+    exportedAt: new Date().toISOString(),
+    points,
+    routes,
+    routes_history,
+    distances,
+  };
+}
+
+/**
+ * Import database tables from a backup object
+ */
+export async function importDatabaseFromJSON(
+  backupData: DatabaseBackupData,
+  mode: 'overwrite' | 'merge' = 'overwrite'
+): Promise<{ pointsCount: number; routesCount: number; historyCount: number }> {
+  if (!backupData || typeof backupData !== 'object') {
+    throw new Error('Nieprawidłowy format pliku kopii zapasowej.');
+  }
+
+  const points = Array.isArray(backupData.points) ? backupData.points : [];
+  const routes = Array.isArray(backupData.routes) ? backupData.routes : [];
+  const routes_history = Array.isArray(backupData.routes_history) ? backupData.routes_history : [];
+  const distances = Array.isArray(backupData.distances) ? backupData.distances : [];
+
+  if (mode === 'overwrite') {
+    await db.transaction('rw', [db.points, db.routes, db.routes_history, db.distances], async () => {
+      await db.points.clear();
+      await db.routes.clear();
+      await db.routes_history.clear();
+      await db.distances.clear();
+
+      if (points.length > 0) await db.points.bulkAdd(points);
+      if (routes.length > 0) await db.routes.bulkAdd(routes);
+      if (routes_history.length > 0) await db.routes_history.bulkAdd(routes_history);
+      if (distances.length > 0) await db.distances.bulkAdd(distances);
+    });
+  } else {
+    // Merge mode: Add without clearing
+    await db.transaction('rw', [db.points, db.routes, db.routes_history, db.distances], async () => {
+      if (points.length > 0) {
+        // Strip IDs when merging to avoid primary key conflicts
+        const cleanPoints = points.map(({ id, ...rest }) => rest);
+        await db.points.bulkAdd(cleanPoints as Point[]);
+      }
+      if (routes.length > 0) {
+        const cleanRoutes = routes.map(({ id, ...rest }) => rest);
+        await db.routes.bulkAdd(cleanRoutes as SavedRoute[]);
+      }
+      if (routes_history.length > 0) {
+        const cleanHistory = routes_history.map(({ id, ...rest }) => rest);
+        await db.routes_history.bulkAdd(cleanHistory as RouteHistory[]);
+      }
+    });
+  }
+
+  // Recalculate distance matrix if needed
+  try {
+    await updateDistanceMatrix();
+  } catch (err) {
+    console.error('Failed to auto-update distance matrix after import:', err);
+  }
+
+  return {
+    pointsCount: points.length,
+    routesCount: routes.length,
+    historyCount: routes_history.length,
+  };
+}

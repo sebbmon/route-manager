@@ -8,7 +8,10 @@ import {
   updateDistanceMatrix,
   Point,
   RouteHistory,
-  SavedRoute
+  SavedRoute,
+  exportDatabaseToJSON,
+  importDatabaseFromJSON,
+  DatabaseBackupData
 } from '@/db/database';
 import {
   MapPin,
@@ -46,7 +49,12 @@ import {
   GripVertical,
   ChevronDown,
   Check,
-  RotateCcw
+  RotateCcw,
+  Save,
+  Download,
+  Upload,
+  Settings,
+  FileJson
 } from 'lucide-react';
 
 // Dynamic import of MapComponent with SSR disabled to prevent Leaflet errors
@@ -157,7 +165,74 @@ export default function Dashboard() {
   }, [savedUserRoutes, activeRouteId]);
 
   // Sidebar navigation tab state
-  const [activeTab, setActiveTab] = useState<'points' | 'route' | 'history'>('points');
+  const [activeTab, setActiveTab] = useState<'points' | 'route' | 'history' | 'backup'>('points');
+
+  // Backup & Restore state & handlers
+  const [importBackupData, setImportBackupData] = useState<DatabaseBackupData | null>(null);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExportBackup = async () => {
+    try {
+      const backupObj = await exportDatabaseToJSON();
+      const jsonStr = JSON.stringify(backupObj, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const dateStr = new Date().toISOString().split('T')[0];
+      a.href = url;
+      a.download = `transport_backup_${dateStr}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      showStatusMessage(`Pobrano kopię zapasową (${backupObj.points.length} pkt, ${backupObj.routes_history.length} tras)`, 'success');
+    } catch (err) {
+      console.error(err);
+      showStatusMessage('Błąd podczas eksportu kopii zapasowej.', 'error');
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const parsed = JSON.parse(text) as DatabaseBackupData;
+        if (!parsed || !Array.isArray(parsed.points)) {
+          showStatusMessage('Wybrany plik nie jest prawidłową kopią zapasową aplikacji.', 'error');
+          return;
+        }
+        setImportBackupData(parsed);
+        setIsImportModalOpen(true);
+      } catch (err) {
+        console.error(err);
+        showStatusMessage('Błąd podczas odczytu pliku JSON.', 'error');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const handleConfirmImport = async (mode: 'overwrite' | 'merge') => {
+    if (!importBackupData) return;
+    try {
+      const res = await importDatabaseFromJSON(importBackupData, mode);
+      showStatusMessage(
+        `Przywrócono bazę (${mode === 'overwrite' ? 'zastąpiono' : 'scalono'}): ${res.pointsCount} punktów, ${res.historyCount} tras.`,
+        'success'
+      );
+      setIsImportModalOpen(false);
+      setImportBackupData(null);
+    } catch (err) {
+      console.error(err);
+      showStatusMessage('Błąd podczas przywracania bazy danych.', 'error');
+    }
+  };
 
   // Ensure an active route ID exists when adding points
   const ensureActiveRouteId = async (): Promise<number> => {
@@ -1316,9 +1391,9 @@ export default function Dashboard() {
     return () => window.removeEventListener('pointerup', handleGlobalPointerUp);
   }, []);
 
-  // Save Route to History
-  const handleSaveRoute = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Save Route to History (as new)
+  const handleSaveRoute = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (activePointIds.length < 2) {
       showStatusMessage('Trasa musi mieć co najmniej 2 punkty!', 'error');
       return;
@@ -1329,18 +1404,46 @@ export default function Dashboard() {
     }
 
     try {
-      await db.routes_history.add({
+      const newId = await db.routes_history.add({
         routeName: routeName.trim(),
         date: new Date().toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }),
         pointsOrder: [...activePointIds],
         totalDistance,
         viaPoints: viaPoints.length > 0 ? [...viaPoints] : undefined
       });
-      showStatusMessage('Trasa została pomyślnie zapisana do historii!', 'success');
-      setRouteName('');
+      setLoadedRouteId(newId as number);
+      showStatusMessage('Zapisano trasę jako nową w historii!', 'success');
     } catch (err) {
       console.error(err);
       showStatusMessage('Nie udało się zapisać trasy do bazy.', 'error');
+    }
+  };
+
+  // Update existing loaded route in History
+  const handleUpdateLoadedRoute = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!loadedRouteId) return;
+    if (activePointIds.length < 2) {
+      showStatusMessage('Trasa musi mieć co najmniej 2 punkty!', 'error');
+      return;
+    }
+    if (!routeName.trim()) {
+      showStatusMessage('Podaj nazwę dla trasy!', 'error');
+      return;
+    }
+
+    try {
+      await db.routes_history.update(loadedRouteId, {
+        routeName: routeName.trim(),
+        date: new Date().toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }),
+        pointsOrder: [...activePointIds],
+        totalDistance,
+        viaPoints: viaPoints.length > 0 ? [...viaPoints] : undefined
+      });
+      showStatusMessage(`Zaktualizowano trasę "${routeName.trim()}" w historii!`, 'success');
+    } catch (err) {
+      console.error(err);
+      showStatusMessage('Wystąpił błąd podczas aktualizowania trasy w bazy.', 'error');
     }
   };
 
@@ -1531,12 +1634,12 @@ export default function Dashboard() {
             <button
               onClick={() => setActiveTab('points')}
               className={`flex-1 py-2 rounded-lg flex items-center justify-center gap-2 transition cursor-pointer ${activeTab === 'points'
-                  ? 'bg-white dark:bg-zinc-850 text-indigo-600 dark:text-indigo-400 shadow-sm border border-zinc-200/80 dark:border-zinc-700/80'
-                  : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+                ? 'bg-white dark:bg-zinc-850 text-indigo-600 dark:text-indigo-400 shadow-sm border border-zinc-200/80 dark:border-zinc-700/80'
+                : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
                 }`}
             >
               <MapIcon className="w-4 h-4" />
-              <span>Baza Punktów</span>
+              <span>Stacje</span>
               <span className="text-xs bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 px-2 py-0.5 rounded-full font-bold">
                 {points.length}
               </span>
@@ -1545,8 +1648,8 @@ export default function Dashboard() {
             <button
               onClick={() => setActiveTab('route')}
               className={`flex-1 py-2 rounded-lg flex items-center justify-center gap-2 transition cursor-pointer ${activeTab === 'route'
-                  ? 'bg-white dark:bg-zinc-850 text-emerald-600 dark:text-emerald-400 shadow-sm border border-zinc-200/80 dark:border-zinc-700/80'
-                  : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+                ? 'bg-white dark:bg-zinc-850 text-emerald-600 dark:text-emerald-400 shadow-sm border border-zinc-200/80 dark:border-zinc-700/80'
+                : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
                 }`}
             >
               <Route className="w-4 h-4" />
@@ -1561,8 +1664,8 @@ export default function Dashboard() {
             <button
               onClick={() => setActiveTab('history')}
               className={`flex-1 py-2 rounded-lg flex items-center justify-center gap-2 transition cursor-pointer ${activeTab === 'history'
-                  ? 'bg-white dark:bg-zinc-850 text-amber-600 dark:text-amber-400 shadow-sm border border-zinc-200/80 dark:border-zinc-700/80'
-                  : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+                ? 'bg-white dark:bg-zinc-850 text-amber-600 dark:text-amber-400 shadow-sm border border-zinc-200/80 dark:border-zinc-700/80'
+                : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
                 }`}
             >
               <History className="w-4 h-4" />
@@ -1570,6 +1673,17 @@ export default function Dashboard() {
               <span className="text-xs bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 px-2 py-0.5 rounded-full font-bold">
                 {savedRoutes.length}
               </span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('backup')}
+              title="Ustawienia i kopia zapasowa bazy (.json)"
+              className={`p-2 rounded-lg flex items-center justify-center transition cursor-pointer flex-shrink-0 ${activeTab === 'backup'
+                ? 'bg-white dark:bg-zinc-850 text-indigo-600 dark:text-indigo-400 shadow-sm border border-zinc-200/80 dark:border-zinc-700/80'
+                : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                }`}
+            >
+              <Settings className="w-4 h-4" />
             </button>
           </div>
 
@@ -1735,8 +1849,8 @@ export default function Dashboard() {
                             key={route.id}
                             onClick={() => setActiveRouteId(route.id!)}
                             className={`flex items-center justify-between p-2.5 rounded-xl border text-xs font-medium cursor-pointer transition group min-w-0 ${isActive
-                                ? 'bg-emerald-600 border-emerald-600 text-white shadow-sm'
-                                : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:border-emerald-500/50'
+                              ? 'bg-emerald-600 border-emerald-600 text-white shadow-sm'
+                              : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 hover:border-emerald-500/50'
                               }`}
                           >
                             <div className="flex items-center gap-1.5 min-w-0 pr-1">
@@ -1824,10 +1938,10 @@ export default function Dashboard() {
                             onPointerEnter={() => handlePointerEnterSavedHover(point.id!)}
                             onClick={() => handleToggleActive(point.id!)}
                             className={`flex items-center justify-between p-3 rounded-xl border transition-all duration-150 ease-out cursor-pointer group select-none ${isBeingDragged
-                                ? 'relative z-20 ring-2 ring-emerald-500/90 shadow-lg bg-emerald-500/10 dark:bg-emerald-950/50'
-                                : isChecked
-                                  ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-950 dark:text-emerald-100'
-                                  : 'bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-950/40 dark:hover:bg-zinc-850 border-zinc-200 dark:border-zinc-800'
+                              ? 'relative z-20 ring-2 ring-emerald-500/90 shadow-lg bg-emerald-500/10 dark:bg-emerald-950/50'
+                              : isChecked
+                                ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-950 dark:text-emerald-100'
+                                : 'bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-950/40 dark:hover:bg-zinc-850 border-zinc-200 dark:border-zinc-800'
                               }`}
                           >
                             <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -1953,11 +2067,10 @@ export default function Dashboard() {
                           type="button"
                           onClick={handleToggleReturnToStart}
                           title="Dodaj lub usuń powrót do punktu startowego na końcu trasy"
-                          className={`text-[11px] font-bold px-2.5 py-1 rounded-lg transition flex items-center gap-1 cursor-pointer ${
-                            isHasReturnLeg
+                          className={`text-[11px] font-bold px-2.5 py-1 rounded-lg transition flex items-center gap-1 cursor-pointer ${isHasReturnLeg
                               ? 'bg-emerald-600 text-white shadow-md'
                               : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20'
-                          }`}
+                            }`}
                         >
                           <RotateCcw className={`w-3 h-3 ${isHasReturnLeg ? 'rotate-180 transition-transform' : ''}`} />
                           <span>{isHasReturnLeg ? 'Pętla: WŁ' : 'Powrót do startu'}</span>
@@ -1965,8 +2078,8 @@ export default function Dashboard() {
                         <button
                           onClick={handleToggleRouteEditMode}
                           className={`text-[11px] font-bold px-2.5 py-1 rounded-lg transition flex items-center gap-1 cursor-pointer ${isRouteEditMode
-                              ? 'bg-amber-500 text-white shadow-md'
-                              : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20'
+                            ? 'bg-amber-500 text-white shadow-md'
+                            : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20'
                             }`}
                         >
                           <Sliders className="w-3 h-3" />
@@ -2005,15 +2118,15 @@ export default function Dashboard() {
                             key={`active-${index}-${point.id}`}
                             onPointerEnter={() => handlePointerEnterHover(index)}
                             className={`space-y-1 transition-all duration-150 ease-out rounded-xl select-none ${isBeingDragged
-                                ? 'relative z-20 ring-2 ring-emerald-500/90 shadow-lg bg-emerald-500/10 dark:bg-emerald-950/50'
-                                : ''
+                              ? 'relative z-20 ring-2 ring-emerald-500/90 shadow-lg bg-emerald-500/10 dark:bg-emerald-950/50'
+                              : ''
                               }`}
                           >
                             <div className={`flex items-center justify-between border rounded-xl p-2.5 transition-colors ${isReturnStop
-                                ? 'bg-emerald-500/10 border-emerald-500/40 dark:bg-emerald-950/30'
-                                : isBeingDragged
-                                  ? 'bg-emerald-500/15 border-emerald-500 dark:border-emerald-500/80'
-                                  : 'bg-zinc-50 dark:bg-zinc-950/40 border-zinc-200 dark:border-zinc-800 hover:border-emerald-500/40'
+                              ? 'bg-emerald-500/10 border-emerald-500/40 dark:bg-emerald-950/30'
+                              : isBeingDragged
+                                ? 'bg-emerald-500/15 border-emerald-500 dark:border-emerald-500/80'
+                                : 'bg-zinc-50 dark:bg-zinc-950/40 border-zinc-200 dark:border-zinc-800 hover:border-emerald-500/40'
                               }`}>
                               <div className="flex items-center gap-2 min-w-0 flex-1">
                                 {/* Drag Handle */}
@@ -2027,8 +2140,8 @@ export default function Dashboard() {
                                   }}
                                   title={isLockedInLoop ? "Przystanek zablokowany w trybie pętli" : "Przytrzymaj i przeciągnij myszą w górę/dół"}
                                   className={`p-1 select-none transition-colors ${isLockedInLoop
-                                      ? 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed opacity-40'
-                                      : 'text-zinc-400 hover:text-emerald-500 cursor-grab active:cursor-grabbing touch-none'
+                                    ? 'text-zinc-300 dark:text-zinc-700 cursor-not-allowed opacity-40'
+                                    : 'text-zinc-400 hover:text-emerald-500 cursor-grab active:cursor-grabbing touch-none'
                                     }`}
                                 >
                                   <GripVertical className="w-4 h-4 flex-shrink-0" />
@@ -2087,27 +2200,76 @@ export default function Dashboard() {
                       })}
                     </div>
 
-                    {/* Save to History Form */}
-                    {activePointIds.length >= 2 && !loadedRouteId && (
-                      <form onSubmit={handleSaveRoute} className="pt-2 space-y-2">
-                        <label className="block text-[11px] font-bold text-zinc-500 uppercase">
-                          Zapisz trasę w historii
-                        </label>
-                        <div className="flex gap-2">
+                    {/* Save / Update Route in History Form */}
+                    {activePointIds.length >= 2 && (
+                      <form onSubmit={loadedRouteId ? handleUpdateLoadedRoute : handleSaveRoute} className="pt-3 space-y-2 border-t border-zinc-200 dark:border-zinc-800">
+                        <div className="flex items-center justify-between">
+                          <label className="block text-[11px] font-bold text-zinc-500 uppercase tracking-wider">
+                            {loadedRouteId ? 'Zapisywanie Zmian w Trasie' : 'Zapisz Trasę w Historii'}
+                          </label>
+                          {loadedRouteId && (
+                            <button
+                              type="button"
+                              onClick={() => setLoadedRouteId(null)}
+                              title="Odłącz tę trasę od zapisanego oryginału w historii"
+                              className="text-[10px] font-bold text-amber-600 dark:text-amber-400 hover:underline cursor-pointer"
+                            >
+                              Odłącz od oryginału
+                            </button>
+                          )}
+                        </div>
+
+                        {loadedRouteId && (
+                          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300 text-[11px] font-medium flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <History className="w-3.5 h-3.5 flex-shrink-0 text-amber-500" />
+                              <span className="truncate">Edytujesz wczytaną trasę</span>
+                            </div>
+                            <span className="text-[10px] bg-amber-500/20 font-bold px-1.5 py-0.5 rounded text-amber-800 dark:text-amber-200 flex-shrink-0">
+                              Wczytana
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="space-y-2">
                           <input
                             type="text"
                             required
                             placeholder="Nazwa trasy (np. Poniedziałek Północ)..."
                             value={routeName}
                             onChange={e => setRouteName(e.target.value)}
-                            className="flex-1 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 transition select-text"
+                            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 transition select-text font-medium"
                           />
-                          <button
-                            type="submit"
-                            className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition cursor-pointer"
-                          >
-                            Zapisz
-                          </button>
+
+                          <div className="flex gap-2">
+                            {loadedRouteId ? (
+                              <>
+                                <button
+                                  type="submit"
+                                  className="flex-1 px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                                >
+                                  <Save className="w-3.5 h-3.5" />
+                                  <span>Aktualizuj tę trasę</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleSaveRoute}
+                                  className="flex-1 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                                >
+                                  <Plus className="w-3.5 h-3.5" />
+                                  <span>Zapisz jako nową</span>
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="submit"
+                                className="w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                              >
+                                <Save className="w-3.5 h-3.5" />
+                                <span>Zapisz w historii</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </form>
                     )}
@@ -2181,6 +2343,77 @@ export default function Dashboard() {
               </div>
             )}
 
+            {/* TAB 4: BACKUP & RESTORE */}
+            {activeTab === 'backup' && (
+              <div className="space-y-4 animate-fade-in">
+                <span className="text-sm font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider block px-1">
+                  Kopia Zapasowa i Przywracanie Bazy (JSON)
+                </span>
+
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  accept=".json"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+
+                {/* Card 1: Export Backup */}
+                <div className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/40 space-y-3 text-left">
+                  <div className="flex items-start gap-3">
+                    <div className="p-2 bg-indigo-500/10 text-indigo-500 rounded-lg flex-shrink-0">
+                      <Download className="w-5 h-5" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-bold text-zinc-900 dark:text-zinc-100">
+                        Pobierz Kopię Zapasową (.json)
+                      </h4>
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                        Zapisz plik kopii ze wszystkimi punktami ({points.length}), grupami tras ({savedUserRoutes.length}) oraz historią tras ({savedRoutes.length}) na swój komputer.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleExportBackup}
+                    className="w-full py-2.5 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Pobierz plik JSON na komputer</span>
+                  </button>
+                </div>
+
+                {/* Card 2: Restore Backup */}
+                <div className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/40 space-y-3 text-left">
+                  <div className="flex items-start gap-3">
+                    <div className="p-2 bg-amber-500/10 text-amber-500 rounded-lg flex-shrink-0">
+                      <Upload className="w-5 h-5" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-bold text-zinc-900 dark:text-zinc-100">
+                        Przywróć dane z pliku JSON
+                      </h4>
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                        Wczytaj wcześniej pobrany plik .json, aby przywrócić zapamiętane punkty i trasy (z możliwością scalenia lub zastąpienia).
+                      </p>
+                    </div>
+                  </div>
+
+                  <div
+                    onClick={() => fileInputRef.current?.click()}
+                    className="border-2 border-dashed border-zinc-300 dark:border-zinc-700 hover:border-amber-500 dark:hover:border-amber-400 rounded-xl p-4 text-center cursor-pointer transition bg-white/50 dark:bg-zinc-900/50 space-y-1.5 group"
+                  >
+                    <FileJson className="w-7 h-7 mx-auto text-zinc-400 group-hover:text-amber-500 transition-colors" />
+                    <p className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                      Kliknij, aby wybrać plik .json z komputera
+                    </p>
+                    <p className="text-[10px] text-zinc-400">
+                      Obsługiwany format: transport_backup_*.json
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </aside>
 
@@ -2449,11 +2682,10 @@ export default function Dashboard() {
                                 setEditFormData(prev => ({ ...prev, routeId: route.id }));
                                 setIsRouteSelectOpen(false);
                               }}
-                              className={`w-full text-left px-3 py-2.5 rounded-lg text-xs font-medium transition flex items-center justify-between gap-2 cursor-pointer ${
-                                isSelected
+                              className={`w-full text-left px-3 py-2.5 rounded-lg text-xs font-medium transition flex items-center justify-between gap-2 cursor-pointer ${isSelected
                                   ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-bold border border-emerald-500/30'
                                   : 'hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
-                              }`}
+                                }`}
                             >
                               <div className="flex items-center gap-2 min-w-0 pr-1">
                                 <Route className={`w-3.5 h-3.5 flex-shrink-0 ${isSelected ? 'text-emerald-500' : 'text-zinc-400'}`} />
@@ -2779,6 +3011,82 @@ export default function Dashboard() {
                 className="flex-1 py-2.5 bg-rose-600 text-white rounded-xl text-sm font-bold hover:bg-rose-500 transition cursor-pointer"
               >
                 Usuń Trasę
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* IMPORT BACKUP MODAL */}
+      {isImportModalOpen && importBackupData && (
+        <div
+          onMouseDown={handleBackdropMouseDown}
+          onClick={e => handleBackdropClick(e, () => {
+            setIsImportModalOpen(false);
+            setImportBackupData(null);
+          })}
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-2xl p-6 w-full max-w-md space-y-4 animate-scale-up text-left cursor-default"
+          >
+            <h3 className="text-lg font-extrabold text-amber-600 dark:text-amber-400 flex items-center gap-2.5">
+              <Upload className="w-6 h-6 text-amber-500" />
+              Przywróć dane z pliku kopii
+            </h3>
+
+            <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-950/50 border border-zinc-200 dark:border-zinc-800 space-y-2 text-xs">
+              <div className="flex justify-between text-zinc-500">
+                <span>Data utworzenia kopii:</span>
+                <span className="font-bold text-zinc-800 dark:text-zinc-200">
+                  {importBackupData.exportedAt ? new Date(importBackupData.exportedAt).toLocaleString('pl-PL') : 'Nieznana'}
+                </span>
+              </div>
+              <div className="flex justify-between text-zinc-500">
+                <span>Punkty w pliku:</span>
+                <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                  {importBackupData.points?.length || 0} punktów
+                </span>
+              </div>
+              <div className="flex justify-between text-zinc-500">
+                <span>Trasy w historii:</span>
+                <span className="font-bold text-amber-600 dark:text-amber-400">
+                  {importBackupData.routes_history?.length || 0} tras
+                </span>
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 font-medium">
+              Wybierz sposób wczytania danych z wybranego pliku JSON:
+            </p>
+
+            <div className="space-y-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => handleConfirmImport('merge')}
+                className="w-full py-2.5 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+              >
+                <span>Scal z obecną bazą (Dopisz dane)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleConfirmImport('overwrite')}
+                className="w-full py-2.5 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+              >
+                <span>Zastąp całą bazę (Nadpisz obecne dane)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setIsImportModalOpen(false);
+                  setImportBackupData(null);
+                }}
+                className="w-full py-2 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 text-xs font-bold transition cursor-pointer"
+              >
+                Anuluj
               </button>
             </div>
           </div>
