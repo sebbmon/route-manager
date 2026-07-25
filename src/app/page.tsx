@@ -360,6 +360,24 @@ export default function Dashboard() {
   const [editIsGeocoding, setEditIsGeocoding] = useState(false);
   const [editGeocodingResults, setEditGeocodingResults] = useState<{ display_name: string; name: string; address: string; lat: number; lng: number }[]>([]);
 
+  // Modal backdrop click safety helper (prevents accidental closing when dragging text selection outside modal)
+  const backdropMouseDownRef = useRef<boolean>(false);
+
+  const handleBackdropMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) {
+      backdropMouseDownRef.current = true;
+    } else {
+      backdropMouseDownRef.current = false;
+    }
+  };
+
+  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>, closeFn: () => void) => {
+    if (e.target === e.currentTarget && backdropMouseDownRef.current) {
+      closeFn();
+    }
+    backdropMouseDownRef.current = false;
+  };
+
   // Geocoding state
   const [addressQuery, setAddressQuery] = useState('');
   const [isGeocoding, setIsGeocoding] = useState(false);
@@ -2264,7 +2282,8 @@ export default function Dashboard() {
       {/* EDIT POINT MODAL */}
       {editingPoint && (
         <div
-          onClick={() => setEditingPoint(null)}
+          onMouseDown={handleBackdropMouseDown}
+          onClick={e => handleBackdropClick(e, () => setEditingPoint(null))}
           className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in text-zinc-950 dark:text-zinc-50 cursor-pointer"
         >
           <div
@@ -2484,7 +2503,8 @@ export default function Dashboard() {
       {/* DELETE CONFIRMATION MODAL */}
       {deletingPoint && (
         <div
-          onClick={() => setDeletingPoint(null)}
+          onMouseDown={handleBackdropMouseDown}
+          onClick={e => handleBackdropClick(e, () => setDeletingPoint(null))}
           className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
         >
           <div
@@ -2521,7 +2541,8 @@ export default function Dashboard() {
       {/* CREATE FOLDER ROUTE MODAL */}
       {isAddRouteModalOpen && (
         <div
-          onClick={() => setIsAddRouteModalOpen(false)}
+          onMouseDown={handleBackdropMouseDown}
+          onClick={e => handleBackdropClick(e, () => setIsAddRouteModalOpen(false))}
           className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
         >
           <div
@@ -2581,7 +2602,8 @@ export default function Dashboard() {
       {/* EDIT FOLDER ROUTE MODAL */}
       {editingFolderRoute && (
         <div
-          onClick={() => setEditingFolderRoute(null)}
+          onMouseDown={handleBackdropMouseDown}
+          onClick={e => handleBackdropClick(e, () => setEditingFolderRoute(null))}
           className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
         >
           <div
@@ -2640,7 +2662,8 @@ export default function Dashboard() {
       {/* DELETE FOLDER ROUTE CONFIRMATION MODAL */}
       {deletingFolderRoute && (
         <div
-          onClick={() => setDeletingFolderRoute(null)}
+          onMouseDown={handleBackdropMouseDown}
+          onClick={e => handleBackdropClick(e, () => setDeletingFolderRoute(null))}
           className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
         >
           <div
@@ -2677,7 +2700,8 @@ export default function Dashboard() {
       {/* EDIT ROUTE MODAL */}
       {editingRoute && (
         <div
-          onClick={() => setEditingRoute(null)}
+          onMouseDown={handleBackdropMouseDown}
+          onClick={e => handleBackdropClick(e, () => setEditingRoute(null))}
           className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
         >
           <div
@@ -2726,7 +2750,8 @@ export default function Dashboard() {
       {/* DELETE ROUTE MODAL */}
       {deletingRoute && (
         <div
-          onClick={() => setDeletingRoute(null)}
+          onMouseDown={handleBackdropMouseDown}
+          onClick={e => handleBackdropClick(e, () => setDeletingRoute(null))}
           className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
         >
           <div
