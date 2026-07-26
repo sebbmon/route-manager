@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Polyline, Popup, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
-import { Point } from '@/db/database';
+import { Point, ViaPoint, normalizeViaPoints, findNearestSegmentIndex } from '@/db/database';
 import { Loader2, Sliders, RotateCcw, Trash2, Layers, Globe, Move } from 'lucide-react';
 
 // Helper icon when hovering over polyline (rubberband handle)
@@ -71,38 +71,55 @@ const createSvgIcon = (color: string, label: string, isHighlighted: boolean) => 
 };
 
 // Helper to create via-point (route correction) marker icons
+const viaIconCache = new Map<number, L.DivIcon>();
+
 const createViaIcon = (index: number) => {
-  const html = `
-    <div class="relative flex items-center justify-center animate-scale-up">
-      <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg" class="drop-shadow-lg">
-        <circle cx="13" cy="13" r="11" fill="#f59e0b" stroke="#ffffff" stroke-width="2.5"/>
-        <text x="13" y="14" fill="white" font-size="10" font-family="system-ui, sans-serif" font-weight="900" text-anchor="middle" dominant-baseline="middle">K${index + 1}</text>
-      </svg>
-    </div>
-  `;
-  return L.divIcon({
-    html,
-    className: 'custom-via-icon',
-    iconSize: [26, 26],
-    iconAnchor: [13, 13],
-    popupAnchor: [0, -13],
-  });
+  if (!viaIconCache.has(index)) {
+    const html = `
+      <div class="relative flex items-center justify-center">
+        <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg" class="drop-shadow-lg">
+          <circle cx="13" cy="13" r="11" fill="#f59e0b" stroke="#ffffff" stroke-width="2.5"/>
+          <text x="13" y="14" fill="white" font-size="10" font-family="system-ui, sans-serif" font-weight="900" text-anchor="middle" dominant-baseline="middle">K${index + 1}</text>
+        </svg>
+      </div>
+    `;
+    viaIconCache.set(
+      index,
+      L.divIcon({
+        html,
+        className: 'custom-via-icon',
+        iconSize: [26, 26],
+        iconAnchor: [13, 13],
+        popupAnchor: [0, -13],
+      })
+    );
+  }
+  return viaIconCache.get(index)!;
 };
+
+let lastRouteDragTimestamp = 0;
 
 // Component to handle map clicks
 function MapEvents({
   onMapClick,
   isRouteEditMode,
   onAddViaPoint,
+  activePoints,
 }: {
   onMapClick: (lat: number, lng: number) => void;
   isRouteEditMode?: boolean;
-  onAddViaPoint?: (lat: number, lng: number) => void;
+  onAddViaPoint?: (lat: number, lng: number, segmentIndex?: number) => void;
+  activePoints: Point[];
 }) {
   useMapEvents({
     click(e) {
+      // Ignore ghost click events right after ending a rubberband line drag
+      if (Date.now() - lastRouteDragTimestamp < 400) {
+        return;
+      }
       if (isRouteEditMode && onAddViaPoint) {
-        onAddViaPoint(e.latlng.lat, e.latlng.lng);
+        const segIdx = findNearestSegmentIndex(e.latlng.lat, e.latlng.lng, activePoints);
+        onAddViaPoint(e.latlng.lat, e.latlng.lng, segIdx);
       } else {
         onMapClick(e.latlng.lat, e.latlng.lng);
       }
@@ -184,10 +201,12 @@ function RouteRubberbandHandler({
   isRouteEditMode,
   activePolylineCoords,
   onAddViaPoint,
+  activePoints,
 }: {
   isRouteEditMode?: boolean;
   activePolylineCoords: [number, number][];
-  onAddViaPoint?: (lat: number, lng: number) => void;
+  onAddViaPoint?: (lat: number, lng: number, segmentIndex?: number) => void;
+  activePoints: Point[];
 }) {
   const map = useMap();
   const [hoverPos, setHoverPos] = useState<[number, number] | null>(null);
@@ -204,6 +223,7 @@ function RouteRubberbandHandler({
     mouseup(e) {
       if (isDraggingRef.current) {
         isDraggingRef.current = false;
+        lastRouteDragTimestamp = Date.now();
         try {
           map.dragging.enable();
         } catch (err) {
@@ -215,7 +235,8 @@ function RouteRubberbandHandler({
         setDragCurrentPos(null);
         setHoverPos(null);
         if (onAddViaPoint) {
-          onAddViaPoint(dropLat, dropLng);
+          const segIdx = findNearestSegmentIndex(dropLat, dropLng, activePoints);
+          onAddViaPoint(dropLat, dropLng, segIdx);
         }
       }
     },
@@ -308,11 +329,12 @@ interface MapComponentProps {
   isDragging?: boolean;
   isRouteEditMode?: boolean;
   onToggleRouteEditMode?: () => void;
-  viaPoints?: [number, number][];
-  onAddViaPoint?: (lat: number, lng: number) => void;
-  onUpdateViaPoint?: (index: number, lat: number, lng: number) => void;
+  viaPoints?: ViaPoint[] | [number, number][];
+  onAddViaPoint?: (lat: number, lng: number, segmentIndex?: number) => void;
+  onUpdateViaPoint?: (index: number, lat: number, lng: number, segmentIndex?: number) => void;
   onRemoveViaPoint?: (index: number) => void;
   onClearViaPoints?: () => void;
+  isModalOpen?: boolean;
 }
 
 function CustomMarker({
@@ -364,6 +386,7 @@ export default function MapComponent({
   onUpdateViaPoint,
   onRemoveViaPoint,
   onClearViaPoints,
+  isModalOpen = false,
 }: MapComponentProps) {
   const [isMounted, setIsMounted] = useState(false);
   const [mapTileStyle, setMapTileStyle] = useState<'streets' | 'satellite'>('streets');
@@ -389,10 +412,11 @@ export default function MapComponent({
     );
   }, [routeCoordinates]);
 
-  const validViaPoints = useMemo(() => {
+  const validViaPoints = useMemo<ViaPoint[]>(() => {
     if (validActivePoints.length < 2) return [];
-    return (viaPoints || []).filter(
-      v => Array.isArray(v) && v.length === 2 && typeof v[0] === 'number' && !isNaN(v[0]) && typeof v[1] === 'number' && !isNaN(v[1])
+    const maxSegmentIndex = validActivePoints.length - 2;
+    return normalizeViaPoints(viaPoints, validActivePoints).filter(
+      v => v && typeof v.lat === 'number' && !isNaN(v.lat) && typeof v.lng === 'number' && !isNaN(v.lng) && typeof v.segmentIndex === 'number' && v.segmentIndex <= maxSegmentIndex
     );
   }, [viaPoints, validActivePoints]);
 
@@ -420,9 +444,9 @@ export default function MapComponent({
   }
 
   return (
-    <div className={`w-full h-full relative ${mapTileStyle === 'satellite' ? 'map-mode-satellite' : 'map-mode-streets'}`}>
+    <div className={`w-full h-full relative ${mapTileStyle === 'satellite' ? 'map-mode-satellite' : 'map-mode-streets'} ${isModalOpen ? 'pointer-events-none select-none' : ''}`}>
       {/* Map Tile Style Switcher (Top-Left Corner next to Leaflet zoom controls) */}
-      <div className="absolute top-3.5 left-14 z-[1000] flex items-center bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md p-1 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-xl select-none">
+      <div className="absolute top-3.5 left-14 z-[1000] flex items-center bg-white dark:bg-zinc-900 p-1 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-xl select-none">
         <button
           type="button"
           onClick={() => setMapTileStyle('streets')}
@@ -449,7 +473,7 @@ export default function MapComponent({
 
       {/* Floating Route Edit Controls Header on Map (Bottom-Left Corner) */}
       {validActivePoints.length >= 2 && onToggleRouteEditMode && (
-        <div className="absolute bottom-6 left-6 z-[1000] flex items-center gap-2 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md p-2 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-2xl select-none">
+        <div className="absolute bottom-6 left-6 z-[1000] flex items-center gap-2 bg-white dark:bg-zinc-900 p-2 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-2xl select-none">
           <button
             type="button"
             onClick={onToggleRouteEditMode}
@@ -522,6 +546,7 @@ export default function MapComponent({
           onMapClick={onMapClick}
           isRouteEditMode={isRouteEditMode}
           onAddViaPoint={onAddViaPoint}
+          activePoints={validActivePoints}
         />
         <MapFitBounds activePoints={validActivePoints} isDragging={isDragging} />
 
@@ -529,6 +554,7 @@ export default function MapComponent({
           isRouteEditMode={isRouteEditMode}
           activePolylineCoords={activePolylineCoords}
           onAddViaPoint={onAddViaPoint}
+          activePoints={validActivePoints}
         />
 
         {/* All Points Markers */}
@@ -552,7 +578,7 @@ export default function MapComponent({
         {validViaPoints.map((via, idx) => (
           <Marker
             key={`via-point-marker-${idx}`}
-            position={[via[0], via[1]]}
+            position={[via.lat, via.lng]}
             icon={createViaIcon(idx)}
             draggable={isRouteEditMode}
             eventHandlers={{
@@ -561,7 +587,7 @@ export default function MapComponent({
                 const marker = e.target;
                 const { lat, lng } = marker.getLatLng();
                 if (onUpdateViaPoint) {
-                  onUpdateViaPoint(idx, lat, lng);
+                  onUpdateViaPoint(idx, lat, lng, via.segmentIndex);
                 }
               },
             }}
@@ -578,7 +604,7 @@ export default function MapComponent({
                 }}
               >
                 <p className="text-xs font-bold text-amber-600 dark:text-amber-400">
-                  Korekta trasowania #{idx + 1}
+                  Korekta trasowania #{idx + 1} (Odcinek {via.segmentIndex + 1})
                 </p>
                 <p className="text-[10px] text-zinc-500">
                   {isRouteEditMode ? 'Możesz przeciągać ten punkt po mapie' : 'Włącz tryb edycji trasy, aby przesuwać/usuwać.'}
@@ -621,7 +647,8 @@ export default function MapComponent({
               eventHandlers={{
                 click: (e) => {
                   if (isRouteEditMode && onAddViaPoint) {
-                    onAddViaPoint(e.latlng.lat, e.latlng.lng);
+                    const segIdx = findNearestSegmentIndex(e.latlng.lat, e.latlng.lng, validActivePoints);
+                    onAddViaPoint(e.latlng.lat, e.latlng.lng, segIdx);
                   }
                 },
               }}
@@ -638,7 +665,8 @@ export default function MapComponent({
               eventHandlers={{
                 click: (e) => {
                   if (isRouteEditMode && onAddViaPoint) {
-                    onAddViaPoint(e.latlng.lat, e.latlng.lng);
+                    const segIdx = findNearestSegmentIndex(e.latlng.lat, e.latlng.lng, validActivePoints);
+                    onAddViaPoint(e.latlng.lat, e.latlng.lng, segIdx);
                   }
                 },
               }}

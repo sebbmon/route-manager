@@ -9,6 +9,9 @@ import {
   Point,
   RouteHistory,
   SavedRoute,
+  ViaPoint,
+  findNearestSegmentIndex,
+  normalizeViaPoints,
   exportDatabaseToJSON,
   importDatabaseFromJSON,
   DatabaseBackupData
@@ -400,13 +403,16 @@ export default function Dashboard() {
 
   // Via-points (route corrections) state
   const [isRouteEditMode, setIsRouteEditMode] = useState(false);
-  const [viaPoints, setViaPoints] = useState<[number, number][]>([]);
+  const [viaPoints, setViaPoints] = useState<ViaPoint[]>([]);
 
   // Route edit mode & via-points are automatically reset whenever active route or active points selection changes
   useEffect(() => {
     setIsRouteEditMode(false);
     if (activePointIds.length < 2) {
       setViaPoints([]);
+    } else {
+      const maxSegmentIndex = activePointIds.length - 2;
+      setViaPoints(prev => prev.filter(v => typeof v.segmentIndex === 'number' && v.segmentIndex <= maxSegmentIndex));
     }
   }, [activePointIds, activeRouteId]);
 
@@ -414,15 +420,32 @@ export default function Dashboard() {
     setIsRouteEditMode(prev => !prev);
   };
 
-  const handleAddViaPoint = (lat: number, lng: number) => {
-    setViaPoints(prev => [...prev, [lat, lng]]);
+  const handleAddViaPoint = (lat: number, lng: number, segmentIndex?: number) => {
+    const activePoints = activePointIds
+      .map(id => points.find(p => p.id === id))
+      .filter((p): p is Point => !!p);
+
+    const finalSegmentIndex = typeof segmentIndex === 'number'
+      ? segmentIndex
+      : findNearestSegmentIndex(lat, lng, activePoints);
+
+    setViaPoints(prev => [...prev, { segmentIndex: finalSegmentIndex, lat, lng }]);
     showStatusMessage('Dodano korektę trasowania na mapie!', 'success');
   };
 
-  const handleUpdateViaPoint = (index: number, lat: number, lng: number) => {
+  const handleUpdateViaPoint = (index: number, lat: number, lng: number, segmentIndex?: number) => {
+    const activePoints = activePointIds
+      .map(id => points.find(p => p.id === id))
+      .filter((p): p is Point => !!p);
+
     setViaPoints(prev => {
       const updated = [...prev];
-      updated[index] = [lat, lng];
+      const existing = updated[index];
+      const segIdx = typeof segmentIndex === 'number'
+        ? segmentIndex
+        : (existing && typeof existing.segmentIndex === 'number' ? existing.segmentIndex : findNearestSegmentIndex(lat, lng, activePoints));
+
+      updated[index] = { segmentIndex: segIdx, lat, lng };
       return updated;
     });
   };
@@ -951,15 +974,24 @@ export default function Dashboard() {
         return;
       }
 
-      const pointCoords = activePoints.map(p => `${p.lng},${p.lat}`);
-      let allCoordsStr: string;
+      const maxSegmentIndex = activePoints.length - 2;
+      const normalizedVias = normalizeViaPoints(viaPoints, activePoints).filter(
+        v => typeof v.segmentIndex === 'number' && v.segmentIndex <= maxSegmentIndex
+      );
+      const allCoordsList: string[] = [];
 
-      if (viaPoints.length > 0) {
-        const viaCoords = viaPoints.map(v => `${v[1]},${v[0]}`);
-        allCoordsStr = [pointCoords[0], ...viaCoords, ...pointCoords.slice(1)].join(';');
-      } else {
-        allCoordsStr = pointCoords.join(';');
+      for (let i = 0; i < activePoints.length - 1; i++) {
+        const p = activePoints[i];
+        allCoordsList.push(`${p.lng},${p.lat}`);
+        const segVias = normalizedVias.filter(v => v.segmentIndex === i);
+        for (const v of segVias) {
+          allCoordsList.push(`${v.lng},${v.lat}`);
+        }
       }
+      const lastP = activePoints[activePoints.length - 1];
+      allCoordsList.push(`${lastP.lng},${lastP.lat}`);
+
+      const allCoordsStr = allCoordsList.join(';');
 
       const url = `http://router.project-osrm.org/route/v1/driving/${allCoordsStr}?overview=full&geometries=geojson`;
 
@@ -1535,10 +1567,11 @@ export default function Dashboard() {
   const handleLoadRoute = (route: RouteHistory) => {
     if (route.id === undefined) return;
     const validIds = route.pointsOrder.filter(id => points.some(p => p.id === id));
+    const loadedActivePoints = validIds.map(id => points.find(p => p.id === id)).filter((p): p is Point => !!p);
     setActivePointIds(validIds);
     setRouteName(route.routeName);
     setLoadedRouteId(route.id);
-    setViaPoints(route.viaPoints || []);
+    setViaPoints(normalizeViaPoints(route.viaPoints, loadedActivePoints));
     setActiveTab('route');
     showStatusMessage(`Wczytano trasę: ${route.routeName}${route.viaPoints && route.viaPoints.length > 0 ? ' (z korektami)' : ''}`, 'success');
   };
@@ -1626,7 +1659,7 @@ export default function Dashboard() {
       {/* 1. NATIVE DESKTOP TITLE BAR */}
       <header
         data-tauri-drag-region
-        className="h-11 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between px-3.5 text-sm select-none z-50 flex-shrink-0"
+        className="h-11 bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between px-3.5 text-sm select-none z-50 flex-shrink-0"
       >
         {/* Left App Brand */}
         <div className="flex items-center gap-2.5" data-tauri-no-drag>
@@ -1680,7 +1713,7 @@ export default function Dashboard() {
       {/* Floating Toast Notification Container (Bottom-Right Pop-Over) */}
       <div className="fixed bottom-10 right-4 z-[9999] flex flex-col gap-2.5 pointer-events-none">
         {error && (
-          <div className="pointer-events-auto flex items-center gap-3 px-4.5 py-3.5 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border border-rose-200 dark:border-rose-900/60 shadow-2xl rounded-2xl text-sm font-bold text-rose-600 dark:text-rose-400 animate-slide-in max-w-md">
+          <div className="pointer-events-auto flex items-center gap-3 px-4.5 py-3.5 bg-white dark:bg-zinc-900 border border-rose-200 dark:border-rose-900/60 shadow-2xl rounded-2xl text-sm font-bold text-rose-600 dark:text-rose-400 animate-slide-in max-w-md">
             <Info className="w-5 h-5 flex-shrink-0 text-rose-500" />
             <span className="pr-2 leading-snug">{error}</span>
             <button
@@ -1693,7 +1726,7 @@ export default function Dashboard() {
           </div>
         )}
         {success && (
-          <div className="pointer-events-auto flex items-center gap-3 px-4.5 py-3.5 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border border-emerald-200 dark:border-emerald-900/60 shadow-2xl rounded-2xl text-sm font-bold text-emerald-600 dark:text-emerald-400 animate-slide-in max-w-md">
+          <div className="pointer-events-auto flex items-center gap-3 px-4.5 py-3.5 bg-white dark:bg-zinc-900 border border-emerald-200 dark:border-emerald-900/60 shadow-2xl rounded-2xl text-sm font-bold text-emerald-600 dark:text-emerald-400 animate-slide-in max-w-md">
             <CheckCircle2 className="w-5 h-5 flex-shrink-0 text-emerald-500" />
             <span className="pr-2 leading-snug">{success}</span>
             <button
@@ -2277,11 +2310,35 @@ export default function Dashboard() {
                               </div>
                             </div>
 
-                            {!isLast && nextStepKm !== undefined && (
-                              <div className="flex items-center pl-7 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                                <div className="w-0.5 h-3.5 bg-zinc-300 dark:bg-zinc-700 mr-2"></div>
-                                <ChevronRight className="w-3.5 h-3.5 mr-0.5" />
-                                <span>+ {nextStepKm.toFixed(1)} km (odcinek)</span>
+                            {!isLast && (
+                              <div className="flex items-center justify-between pl-7 pr-1 h-7 my-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                                <div className="flex items-center">
+                                  <div className="w-0.5 h-4 bg-zinc-300 dark:bg-zinc-700 mr-2"></div>
+                                  <ChevronRight className="w-3.5 h-3.5 mr-0.5 flex-shrink-0" />
+                                  {nextStepKm !== undefined ? (
+                                    <span>+ {nextStepKm.toFixed(1)} km (odcinek)</span>
+                                  ) : (
+                                    <span className="text-zinc-400 text-[11px]">Odcinek {index + 1}</span>
+                                  )}
+                                </div>
+                                {viaPoints.filter(v => v.segmentIndex === index).length > 0 ? (
+                                  <span
+                                    title={`Dodano ${viaPoints.filter(v => v.segmentIndex === index).length} waypoint(y) na tym odcinku`}
+                                    className="text-[10px] leading-tight bg-amber-500/15 text-amber-600 dark:text-amber-400 font-extrabold px-2 py-0.5 rounded-full border border-amber-500/30 flex items-center gap-1 select-none flex-shrink-0"
+                                  >
+                                    <span>📍</span>
+                                    <span>
+                                      {viaPoints.filter(v => v.segmentIndex === index).length}{' '}
+                                      {viaPoints.filter(v => v.segmentIndex === index).length === 1
+                                        ? 'waypoint'
+                                        : viaPoints.filter(v => v.segmentIndex === index).length < 5
+                                          ? 'waypointy'
+                                          : 'waypointów'}
+                                    </span>
+                                  </span>
+                                ) : (
+                                  <div className="h-5 w-1"></div>
+                                )}
                               </div>
                             )}
                           </div>
@@ -2533,7 +2590,7 @@ export default function Dashboard() {
           <div className="absolute top-4 right-4 z-[400] flex flex-col gap-3 pointer-events-none">
 
             {/* Total Distance Telemetry Badge */}
-            <div className="pointer-events-auto bg-zinc-900/90 dark:bg-zinc-900/95 backdrop-blur-md text-white px-4 py-3 rounded-2xl border border-zinc-700/60 shadow-2xl flex items-center justify-between gap-6 min-w-[280px]">
+            <div className="pointer-events-auto bg-zinc-900 text-white px-4 py-3 rounded-2xl border border-zinc-700/60 shadow-2xl flex items-center justify-between gap-6 min-w-[280px]">
               <div>
                 <span className="text-[10px] font-extrabold uppercase text-emerald-400 tracking-wider">
                   Dystans Dzisiejszego Planu
@@ -2559,7 +2616,7 @@ export default function Dashboard() {
               <div className="pointer-events-auto flex items-center justify-end gap-2">
                 <button
                   onClick={handleClearActiveRoute}
-                  className="px-3 py-1.5 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md hover:bg-rose-500 hover:text-white border border-zinc-200 dark:border-zinc-700 rounded-xl text-xs font-bold shadow-md text-rose-600 dark:text-rose-400 transition cursor-pointer flex items-center gap-1"
+                  className="px-3 py-1.5 bg-white dark:bg-zinc-900 hover:bg-rose-500 hover:text-white border border-zinc-200 dark:border-zinc-700 rounded-xl text-xs font-bold shadow-md text-rose-600 dark:text-rose-400 transition cursor-pointer flex items-center gap-1"
                 >
                   <X className="w-3.5 h-3.5" />
                   <span>Wyczyść Trasę</span>
@@ -2577,21 +2634,37 @@ export default function Dashboard() {
           </div>
 
           {/* Leaflet Interactive Map Component */}
-          <MapComponent
-            points={activeRoutePoints}
-            activePoints={activePoints}
-            routeCoordinates={routeCoordinates}
-            onMapClick={handleMapClick}
-            isMapMaximized={isMapMaximized}
-            isDragging={activeDragIndex !== null}
-            isRouteEditMode={isRouteEditMode}
-            onToggleRouteEditMode={handleToggleRouteEditMode}
-            viaPoints={viaPoints}
-            onAddViaPoint={handleAddViaPoint}
-            onUpdateViaPoint={handleUpdateViaPoint}
-            onRemoveViaPoint={handleRemoveViaPoint}
-            onClearViaPoints={handleClearViaPoints}
-          />
+          {(() => {
+            const isModalOpen = Boolean(
+              editingPoint ||
+              deletingPoint ||
+              isAddRouteModalOpen ||
+              editingFolderRoute ||
+              deletingFolderRoute ||
+              editingRoute ||
+              deletingRoute ||
+              isImportModalOpen ||
+              isGmapsExportModalOpen
+            );
+            return (
+              <MapComponent
+                points={activeRoutePoints}
+                activePoints={activePoints}
+                routeCoordinates={routeCoordinates}
+                onMapClick={handleMapClick}
+                isMapMaximized={isMapMaximized}
+                isDragging={activeDragIndex !== null}
+                isRouteEditMode={isRouteEditMode}
+                onToggleRouteEditMode={handleToggleRouteEditMode}
+                viaPoints={viaPoints}
+                onAddViaPoint={handleAddViaPoint}
+                onUpdateViaPoint={handleUpdateViaPoint}
+                onRemoveViaPoint={handleRemoveViaPoint}
+                onClearViaPoints={handleClearViaPoints}
+                isModalOpen={isModalOpen}
+              />
+            );
+          })()}
         </main>
       </div>
 
@@ -2599,7 +2672,7 @@ export default function Dashboard() {
       <footer className="h-7 bg-zinc-100 dark:bg-zinc-900 border-t border-zinc-200 dark:border-zinc-800 px-4 flex items-center justify-between text-[11px] text-zinc-500 dark:text-zinc-400 select-none flex-shrink-0 z-40">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-semibold">
-            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping"></span>
+            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>
             <span>OSRM Engine Online</span>
           </div>
           <span>•</span>
@@ -2626,7 +2699,7 @@ export default function Dashboard() {
         <div
           onMouseDown={handleBackdropMouseDown}
           onClick={e => handleBackdropClick(e, () => setEditingPoint(null))}
-          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in text-zinc-950 dark:text-zinc-50 cursor-pointer"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/75 animate-fade-in text-zinc-950 dark:text-zinc-50 cursor-pointer"
         >
           <div
             onClick={e => e.stopPropagation()}
@@ -2846,7 +2919,7 @@ export default function Dashboard() {
         <div
           onMouseDown={handleBackdropMouseDown}
           onClick={e => handleBackdropClick(e, () => setDeletingPoint(null))}
-          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/75 animate-fade-in cursor-pointer"
         >
           <div
             onClick={e => e.stopPropagation()}
@@ -2884,7 +2957,7 @@ export default function Dashboard() {
         <div
           onMouseDown={handleBackdropMouseDown}
           onClick={e => handleBackdropClick(e, () => setIsAddRouteModalOpen(false))}
-          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/75 animate-fade-in cursor-pointer"
         >
           <div
             onClick={e => e.stopPropagation()}
@@ -2945,7 +3018,7 @@ export default function Dashboard() {
         <div
           onMouseDown={handleBackdropMouseDown}
           onClick={e => handleBackdropClick(e, () => setEditingFolderRoute(null))}
-          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/75 animate-fade-in cursor-pointer"
         >
           <div
             onClick={e => e.stopPropagation()}
@@ -3005,7 +3078,7 @@ export default function Dashboard() {
         <div
           onMouseDown={handleBackdropMouseDown}
           onClick={e => handleBackdropClick(e, () => setDeletingFolderRoute(null))}
-          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/75 animate-fade-in cursor-pointer"
         >
           <div
             onClick={e => e.stopPropagation()}
@@ -3043,7 +3116,7 @@ export default function Dashboard() {
         <div
           onMouseDown={handleBackdropMouseDown}
           onClick={e => handleBackdropClick(e, () => setEditingRoute(null))}
-          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/75 animate-fade-in cursor-pointer"
         >
           <div
             onClick={e => e.stopPropagation()}
@@ -3093,7 +3166,7 @@ export default function Dashboard() {
         <div
           onMouseDown={handleBackdropMouseDown}
           onClick={e => handleBackdropClick(e, () => setDeletingRoute(null))}
-          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/75 animate-fade-in cursor-pointer"
         >
           <div
             onClick={e => e.stopPropagation()}
@@ -3134,7 +3207,7 @@ export default function Dashboard() {
             setIsImportModalOpen(false);
             setImportBackupData(null);
           })}
-          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/60 backdrop-blur-[2px] animate-fade-in cursor-pointer"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/75 animate-fade-in cursor-pointer"
         >
           <div
             onClick={e => e.stopPropagation()}
@@ -3207,7 +3280,7 @@ export default function Dashboard() {
         <div
           onMouseDown={handleBackdropMouseDown}
           onClick={e => handleBackdropClick(e, () => setIsGmapsExportModalOpen(false))}
-          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/70 backdrop-blur-[2px] animate-fade-in cursor-pointer"
+          className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-zinc-950/75 animate-fade-in cursor-pointer"
         >
           <div
             onClick={e => e.stopPropagation()}

@@ -24,13 +24,67 @@ export interface Distance {
   distanceKm: number;
 }
 
+export interface ViaPoint {
+  segmentIndex: number;
+  lat: number;
+  lng: number;
+}
+
+function distanceToSegmentSquared(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const l2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
+  if (l2 === 0) return (px - ax) * (px - ax) + (py - ay) * (py - ay);
+  let t = ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  const projX = ax + t * (bx - ax);
+  const projY = ay + t * (by - ay);
+  return (px - projX) * (px - projX) + (py - projY) * (py - projY);
+}
+
+export function findNearestSegmentIndex(lat: number, lng: number, activePoints: Point[]): number {
+  if (!activePoints || activePoints.length < 2) return 0;
+  let minDistance = Infinity;
+  let bestIndex = 0;
+
+  for (let i = 0; i < activePoints.length - 1; i++) {
+    const p1 = activePoints[i];
+    const p2 = activePoints[i + 1];
+    if (!p1 || !p2 || typeof p1.lat !== 'number' || typeof p1.lng !== 'number' || typeof p2.lat !== 'number' || typeof p2.lng !== 'number') {
+      continue;
+    }
+    const distSq = distanceToSegmentSquared(lat, lng, p1.lat, p1.lng, p2.lat, p2.lng);
+    if (distSq < minDistance) {
+      minDistance = distSq;
+      bestIndex = i;
+    }
+  }
+
+  return bestIndex;
+}
+
+export function normalizeViaPoints(
+  rawViaPoints: (ViaPoint | [number, number])[] | undefined | null,
+  activePoints: Point[]
+): ViaPoint[] {
+  if (!rawViaPoints || rawViaPoints.length === 0) return [];
+
+  return rawViaPoints.map(v => {
+    if (Array.isArray(v)) {
+      const lat = v[0];
+      const lng = v[1];
+      const segmentIndex = activePoints.length >= 2 ? findNearestSegmentIndex(lat, lng, activePoints) : 0;
+      return { segmentIndex, lat, lng };
+    }
+    return v;
+  });
+}
+
 export interface RouteHistory {
   id?: number;
   routeName: string;
   date: string;
   pointsOrder: number[]; // Array of Point IDs
   totalDistance: number;
-  viaPoints?: [number, number][]; // Custom route via points [lat, lng][]
+  viaPoints?: ViaPoint[] | [number, number][]; // Custom route via points with segment index (or legacy [lat, lng][])
 }
 
 export class RoutePlannerDatabase extends Dexie {
