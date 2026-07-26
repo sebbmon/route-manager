@@ -132,24 +132,29 @@ function MapFitBounds({ activePoints, isDragging }: { activePoints: Point[]; isD
   useEffect(() => {
     if (isDragging) return;
     if (validActivePoints.length > 0 && map && (map as any)._container) {
-      const raf = requestAnimationFrame(() => {
+      const timer = setTimeout(() => {
         try {
-          if (map && (map as any)._container) {
+          if (
+            map &&
+            (map as any)._loaded &&
+            (map as any)._container &&
+            (map as any)._mapPane &&
+            (map as any)._mapPane._leaflet_pos !== undefined
+          ) {
             const bounds = L.latLngBounds(validActivePoints.map(p => [p.lat, p.lng]));
             if (bounds.isValid()) {
               map.fitBounds(bounds, {
                 padding: [50, 50],
                 maxZoom: 14,
-                animate: true,
-                duration: 1,
+                animate: false,
               });
             }
           }
         } catch (err) {
-          console.error('Leaflet fitBounds error:', err);
+          // Ignore fitBounds errors during rapid DOM resize / unmount
         }
-      });
-      return () => cancelAnimationFrame(raf);
+      }, 100);
+      return () => clearTimeout(timer);
     }
   }, [activeSetKey, map, isDragging, validActivePoints]);
 
