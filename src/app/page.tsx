@@ -12,6 +12,7 @@ import {
   ViaPoint,
   findNearestSegmentIndex,
   normalizeViaPoints,
+  sortViaPointsForSegment,
   exportDatabaseToJSON,
   importDatabaseFromJSON,
   DatabaseBackupData
@@ -981,10 +982,12 @@ export default function Dashboard() {
       const allCoordsList: string[] = [];
 
       for (let i = 0; i < activePoints.length - 1; i++) {
-        const p = activePoints[i];
-        allCoordsList.push(`${p.lng},${p.lat}`);
+        const p1 = activePoints[i];
+        const p2 = activePoints[i + 1];
+        allCoordsList.push(`${p1.lng},${p1.lat}`);
         const segVias = normalizedVias.filter(v => v.segmentIndex === i);
-        for (const v of segVias) {
+        const sortedSegVias = sortViaPointsForSegment(segVias, p1, p2);
+        for (const v of sortedSegVias) {
           allCoordsList.push(`${v.lng},${v.lat}`);
         }
       }
@@ -993,11 +996,18 @@ export default function Dashboard() {
 
       const allCoordsStr = allCoordsList.join(';');
 
-      const url = `http://router.project-osrm.org/route/v1/driving/${allCoordsStr}?overview=full&geometries=geojson`;
+      const url = `https://router.project-osrm.org/route/v1/driving/${allCoordsStr}?overview=full&geometries=geojson`;
 
       try {
         const res = await fetch(url);
-        if (!res.ok) throw new Error('OSRM Route API failed');
+        if (!res.ok) {
+          if (res.status === 429) {
+            showStatusMessage('Limit zapytań darmowego serwera (429 Rate Limit). Odczekaj chwilę.', 'error');
+          } else {
+            showStatusMessage('Błąd pobierania trasy z serwera OSRM.', 'error');
+          }
+          throw new Error(`OSRM Route API failed: ${res.status}`);
+        }
         const data = await res.json();
 
         if (data.code === 'Ok' && data.routes?.[0]?.geometry?.coordinates) {

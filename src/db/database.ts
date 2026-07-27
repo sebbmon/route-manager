@@ -40,8 +40,38 @@ function distanceToSegmentSquared(px: number, py: number, ax: number, ay: number
   return (px - projX) * (px - projX) + (py - projY) * (py - projY);
 }
 
-export function findNearestSegmentIndex(lat: number, lng: number, activePoints: Point[]): number {
+export function findNearestSegmentIndex(
+  lat: number,
+  lng: number,
+  activePoints: Point[],
+  segmentPolylines?: [number, number][][]
+): number {
   if (!activePoints || activePoints.length < 2) return 0;
+
+  // If detailed segment polylines are available, measure distance to actual road polyline
+  if (segmentPolylines && segmentPolylines.length === activePoints.length - 1) {
+    let minDistance = Infinity;
+    let bestIndex = 0;
+
+    for (let i = 0; i < segmentPolylines.length; i++) {
+      const coords = segmentPolylines[i];
+      if (!coords || coords.length === 0) continue;
+
+      for (let j = 0; j < coords.length - 1; j++) {
+        const p1 = coords[j];
+        const p2 = coords[j + 1];
+        const distSq = distanceToSegmentSquared(lat, lng, p1[0], p1[1], p2[0], p2[1]);
+        if (distSq < minDistance) {
+          minDistance = distSq;
+          bestIndex = i;
+        }
+      }
+    }
+
+    return bestIndex;
+  }
+
+  // Fallback to straight line segments between main active points
   let minDistance = Infinity;
   let bestIndex = 0;
 
@@ -59,6 +89,22 @@ export function findNearestSegmentIndex(lat: number, lng: number, activePoints: 
   }
 
   return bestIndex;
+}
+
+export function getSegmentProjectionT(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const l2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
+  if (l2 === 0) return 0;
+  let t = ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / l2;
+  return Math.max(0, Math.min(1, t));
+}
+
+export function sortViaPointsForSegment(segVias: ViaPoint[], p1: Point, p2: Point): ViaPoint[] {
+  if (!segVias || segVias.length <= 1 || !p1 || !p2) return segVias || [];
+  return [...segVias].sort((a, b) => {
+    const tA = getSegmentProjectionT(a.lat, a.lng, p1.lat, p1.lng, p2.lat, p2.lng);
+    const tB = getSegmentProjectionT(b.lat, b.lng, p1.lat, p1.lng, p2.lat, p2.lng);
+    return tA - tB;
+  });
 }
 
 export function normalizeViaPoints(

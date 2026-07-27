@@ -3,42 +3,84 @@
 import { useEffect, useState, useMemo, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Polyline, Popup, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
-import { Point, ViaPoint, normalizeViaPoints, findNearestSegmentIndex } from '@/db/database';
+import { Point, ViaPoint, normalizeViaPoints, findNearestSegmentIndex, sortViaPointsForSegment } from '@/db/database';
 import { Loader2, Sliders, RotateCcw, Trash2, Layers, Globe, Move } from 'lucide-react';
 
-// Helper icon when hovering over polyline (rubberband handle)
+// Helper function to fetch detailed OSRM route geometry dynamically
+async function fetchOsrmGeometry(
+  activePoints: Point[],
+  viaPoints: ViaPoint[],
+  signal?: AbortSignal
+): Promise<[number, number][] | null> {
+  if (activePoints.length < 2) return null;
+  const maxSegmentIndex = activePoints.length - 2;
+  const normalizedVias = normalizeViaPoints(viaPoints, activePoints).filter(
+    v => typeof v.segmentIndex === 'number' && v.segmentIndex <= maxSegmentIndex
+  );
+  const allCoordsList: string[] = [];
+
+  for (let i = 0; i < activePoints.length - 1; i++) {
+    const p1 = activePoints[i];
+    const p2 = activePoints[i + 1];
+    allCoordsList.push(`${p1.lng},${p1.lat}`);
+    const segVias = normalizedVias.filter(v => v.segmentIndex === i);
+    const sortedSegVias = sortViaPointsForSegment(segVias, p1, p2);
+    for (const v of sortedSegVias) {
+      allCoordsList.push(`${v.lng},${v.lat}`);
+    }
+  }
+  const lastP = activePoints[activePoints.length - 1];
+  allCoordsList.push(`${lastP.lng},${lastP.lat}`);
+
+  const allCoordsStr = allCoordsList.join(';');
+  const url = `https://router.project-osrm.org/route/v1/driving/${allCoordsStr}?overview=full&geometries=geojson`;
+
+  try {
+    const res = await fetch(url, { signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.code === 'Ok' && data.routes?.[0]?.geometry?.coordinates) {
+      return data.routes[0].geometry.coordinates.map((c: [number, number]) => [c[1], c[0]] as [number, number]);
+    }
+  } catch (err) {
+    // Ignore fetch aborts or network blips
+  }
+  return null;
+}
+
+// Google Maps style hover handle icon on polyline
 const createRubberbandHandleIcon = () => {
   const html = `
-    <div class="relative flex items-center justify-center pointer-events-none">
-      <span class="absolute w-6 h-6 rounded-full bg-amber-400/40 animate-ping"></span>
-      <div class="w-4 h-4 bg-amber-500 rounded-full border-2 border-white shadow-lg flex items-center justify-center">
-        <div class="w-1.5 h-1.5 bg-white rounded-full"></div>
+    <div class="relative flex items-center justify-center pointer-events-none transform -translate-x-1/2 -translate-y-1/2">
+      <span class="absolute w-5 h-5 rounded-full bg-blue-500/30 animate-ping"></span>
+      <div class="w-4 h-4 bg-white rounded-full border-2 border-blue-600 shadow-xl flex items-center justify-center transition-transform scale-110">
+        <div class="w-1.5 h-1.5 bg-blue-600 rounded-full"></div>
       </div>
     </div>
   `;
   return L.divIcon({
     html,
     className: 'custom-rubberband-handle',
-    iconSize: [24, 24],
-    iconAnchor: [12, 12],
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
   });
 };
 
-// Helper icon while dragging route line
+// Google Maps style dragging handle icon
 const createRubberbandDraggingIcon = () => {
   const html = `
-    <div class="relative flex items-center justify-center pointer-events-none">
-      <div class="px-2.5 py-1 bg-amber-500 text-white text-[10px] font-black rounded-full shadow-2xl border border-white flex items-center gap-1">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3"/><path d="M9 5l3-3 3 3"/><path d="M19 9l3 3-3 3"/><path d="M9 19l3 3 3-3"/><path d="M2 12h20"/><path d="M12 2v20"/></svg>
-        <span>Dodaj korektę</span>
+    <div class="relative flex items-center justify-center pointer-events-none transform -translate-x-1/2 -translate-y-1/2">
+      <span class="absolute w-7 h-7 rounded-full bg-blue-500/25 animate-pulse"></span>
+      <div class="w-5 h-5 bg-blue-600 rounded-full border-2 border-white shadow-2xl ring-2 ring-blue-500/50 flex items-center justify-center">
+        <div class="w-1.5 h-1.5 bg-white rounded-full"></div>
       </div>
     </div>
   `;
   return L.divIcon({
     html,
     className: 'custom-rubberband-dragging',
-    iconSize: [96, 24],
-    iconAnchor: [48, 12],
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
   });
 };
 
@@ -70,17 +112,16 @@ const createSvgIcon = (color: string, label: string, isHighlighted: boolean) => 
   });
 };
 
-// Helper to create via-point (route correction) marker icons
+// Google Maps style subtle waypoint nodes
 const viaIconCache = new Map<number, L.DivIcon>();
 
 const createViaIcon = (index: number) => {
   if (!viaIconCache.has(index)) {
     const html = `
-      <div class="relative flex items-center justify-center">
-        <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg" class="drop-shadow-lg">
-          <circle cx="13" cy="13" r="11" fill="#f59e0b" stroke="#ffffff" stroke-width="2.5"/>
-          <text x="13" y="14" fill="white" font-size="10" font-family="system-ui, sans-serif" font-weight="900" text-anchor="middle" dominant-baseline="middle">K${index + 1}</text>
-        </svg>
+      <div class="relative flex items-center justify-center group cursor-grab">
+        <div class="w-4 h-4 rounded-full bg-white border-[2.5px] border-amber-500 shadow-md transition-all duration-200 group-hover:scale-125 group-hover:border-amber-600 flex items-center justify-center">
+          <div class="w-1.5 h-1.5 rounded-full bg-amber-500 group-hover:bg-amber-600"></div>
+        </div>
       </div>
     `;
     viaIconCache.set(
@@ -88,9 +129,9 @@ const createViaIcon = (index: number) => {
       L.divIcon({
         html,
         className: 'custom-via-icon',
-        iconSize: [26, 26],
-        iconAnchor: [13, 13],
-        popupAnchor: [0, -13],
+        iconSize: [16, 16],
+        iconAnchor: [8, 8],
+        popupAnchor: [0, -8],
       })
     );
   }
@@ -105,20 +146,21 @@ function MapEvents({
   isRouteEditMode,
   onAddViaPoint,
   activePoints,
+  segmentPolylines,
 }: {
   onMapClick: (lat: number, lng: number) => void;
   isRouteEditMode?: boolean;
   onAddViaPoint?: (lat: number, lng: number, segmentIndex?: number) => void;
   activePoints: Point[];
+  segmentPolylines?: [number, number][][];
 }) {
   useMapEvents({
     click(e) {
-      // Ignore ghost click events right after ending a rubberband line drag
       if (Date.now() - lastRouteDragTimestamp < 400) {
         return;
       }
       if (isRouteEditMode && onAddViaPoint) {
-        const segIdx = findNearestSegmentIndex(e.latlng.lat, e.latlng.lng, activePoints);
+        const segIdx = findNearestSegmentIndex(e.latlng.lat, e.latlng.lng, activePoints, segmentPolylines);
         onAddViaPoint(e.latlng.lat, e.latlng.lng, segIdx);
       } else {
         onMapClick(e.latlng.lat, e.latlng.lng);
@@ -196,46 +238,91 @@ function MapInvalidateSize({ isMapMaximized }: { isMapMaximized?: boolean }) {
   return null;
 }
 
-// Component for dragging the route line (Rubberbanding)
+// Component for real-time dynamic route dragging (Google Maps style)
 function RouteRubberbandHandler({
   isRouteEditMode,
   activePolylineCoords,
+  segmentPolylines,
   onAddViaPoint,
   activePoints,
+  validViaPoints,
+  setLiveDragRouteCoords,
 }: {
   isRouteEditMode?: boolean;
   activePolylineCoords: [number, number][];
+  segmentPolylines: [number, number][][];
   onAddViaPoint?: (lat: number, lng: number, segmentIndex?: number) => void;
   activePoints: Point[];
+  validViaPoints: ViaPoint[];
+  setLiveDragRouteCoords: (coords: [number, number][] | null) => void;
 }) {
   const map = useMap();
   const [hoverPos, setHoverPos] = useState<[number, number] | null>(null);
   const [dragStartPos, setDragStartPos] = useState<[number, number] | null>(null);
   const [dragCurrentPos, setDragCurrentPos] = useState<[number, number] | null>(null);
+
   const isDraggingRef = useRef(false);
+  const dragSegmentIdxRef = useRef<number>(0);
+  const lastOsrmFetchTimeRef = useRef<number>(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useMapEvents({
     mousemove(e) {
       if (isDraggingRef.current) {
-        setDragCurrentPos([e.latlng.lat, e.latlng.lng]);
+        const curLat = e.latlng.lat;
+        const curLng = e.latlng.lng;
+        setDragCurrentPos([curLat, curLng]);
+
+        // Throttled OSRM route fetch during mouse movement (500ms)
+        const now = Date.now();
+        if (now - lastOsrmFetchTimeRef.current > 500) {
+          lastOsrmFetchTimeRef.current = now;
+
+          if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+          }
+          const controller = new AbortController();
+          abortControllerRef.current = controller;
+
+          const tempVias: ViaPoint[] = [
+            ...validViaPoints,
+            { segmentIndex: dragSegmentIdxRef.current, lat: curLat, lng: curLng }
+          ];
+
+          fetchOsrmGeometry(activePoints, tempVias, controller.signal).then(coords => {
+            if (coords && isDraggingRef.current) {
+              setLiveDragRouteCoords(coords);
+            }
+          });
+        }
       }
     },
     mouseup(e) {
       if (isDraggingRef.current) {
         isDraggingRef.current = false;
         lastRouteDragTimestamp = Date.now();
+
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+        }
+
         try {
           map.dragging.enable();
         } catch (err) {
           console.error(err);
         }
+
         const dropLat = e.latlng.lat;
         const dropLng = e.latlng.lng;
+        const segIdx = dragSegmentIdxRef.current;
+
         setDragStartPos(null);
         setDragCurrentPos(null);
         setHoverPos(null);
+        // Keep liveDragRouteCoords active so there is zero flicker while page.tsx fetches updated routeCoordinates
+
         if (onAddViaPoint) {
-          const segIdx = findNearestSegmentIndex(dropLat, dropLng, activePoints);
           onAddViaPoint(dropLat, dropLng, segIdx);
         }
       }
@@ -246,48 +333,54 @@ function RouteRubberbandHandler({
 
   return (
     <>
-      {/* Hitbox Polyline for catching hover/drag anywhere on the route line */}
-      <Polyline
-        positions={activePolylineCoords}
-        color="#f59e0b"
-        weight={26}
-        opacity={0.001}
-        eventHandlers={{
-          mouseover: (e) => {
-            if (!isDraggingRef.current) {
-              setHoverPos([e.latlng.lat, e.latlng.lng]);
-            }
-          },
-          mousemove: (e) => {
-            if (!isDraggingRef.current) {
-              setHoverPos([e.latlng.lat, e.latlng.lng]);
-            }
-          },
-          mouseout: () => {
-            if (!isDraggingRef.current) {
-              setHoverPos(null);
-            }
-          },
-          mousedown: (e) => {
-            if (isRouteEditMode) {
-              if (e.originalEvent) {
-                L.DomEvent.stopPropagation(e.originalEvent);
+      {/* Dedicated Invisible Hitbox Polylines per segment for 100% deterministic segment detection */}
+      {segmentPolylines.map((segCoords, segIdx) => (
+        <Polyline
+          key={`hitbox-segment-${segIdx}`}
+          positions={segCoords}
+          color="#3b82f6"
+          weight={30}
+          opacity={0.001}
+          eventHandlers={{
+            mouseover: (e) => {
+              if (!isDraggingRef.current) {
+                setHoverPos([e.latlng.lat, e.latlng.lng]);
               }
-              isDraggingRef.current = true;
-              try {
-                map.dragging.disable();
-              } catch (err) {
-                console.error(err);
+            },
+            mousemove: (e) => {
+              if (!isDraggingRef.current) {
+                setHoverPos([e.latlng.lat, e.latlng.lng]);
               }
-              const start: [number, number] = [e.latlng.lat, e.latlng.lng];
-              setDragStartPos(start);
-              setDragCurrentPos(start);
-            }
-          },
-        }}
-      />
+            },
+            mouseout: () => {
+              if (!isDraggingRef.current) {
+                setHoverPos(null);
+              }
+            },
+            mousedown: (e) => {
+              if (isRouteEditMode) {
+                if (e.originalEvent) {
+                  L.DomEvent.stopPropagation(e.originalEvent);
+                }
+                isDraggingRef.current = true;
+                try {
+                  map.dragging.disable();
+                } catch (err) {
+                  console.error(err);
+                }
+                dragSegmentIdxRef.current = segIdx; // 100% EXACT SEGMENT INDEX!
+                const startLat = e.latlng.lat;
+                const startLng = e.latlng.lng;
+                const start: [number, number] = [startLat, startLng];
+                setDragStartPos(start);
+                setDragCurrentPos(start);
+              }
+            },
+          }}
+        />
+      ))}
 
-      {/* Hover handle marker on polyline */}
+      {/* Google Maps style Hover Handle Marker on Polyline */}
       {hoverPos && !dragStartPos && (
         <Marker
           key="rubberband-hover-marker"
@@ -297,24 +390,14 @@ function RouteRubberbandHandler({
         />
       )}
 
-      {/* Rubberband live line preview while dragging line */}
+      {/* Live Dragging Handle Node */}
       {dragStartPos && dragCurrentPos && (
-        <>
-          <Polyline
-            key="rubberband-drag-line"
-            positions={[dragStartPos, dragCurrentPos]}
-            color="#f59e0b"
-            weight={4}
-            dashArray="6, 8"
-            opacity={0.95}
-          />
-          <Marker
-            key="rubberband-drag-marker"
-            position={dragCurrentPos}
-            icon={createRubberbandDraggingIcon()}
-            interactive={false}
-          />
-        </>
+        <Marker
+          key="rubberband-drag-marker"
+          position={dragCurrentPos}
+          icon={createRubberbandDraggingIcon()}
+          interactive={false}
+        />
       )}
     </>
   );
@@ -372,6 +455,105 @@ function CustomMarker({
   );
 }
 
+function ViaPointMarker({
+  via,
+  idx,
+  isRouteEditMode,
+  onUpdateViaPoint,
+  onRemoveViaPoint,
+  activePoints,
+  validViaPoints,
+  setLiveDragRouteCoords,
+}: {
+  via: ViaPoint;
+  idx: number;
+  isRouteEditMode?: boolean;
+  onUpdateViaPoint?: (index: number, lat: number, lng: number, segmentIndex?: number) => void;
+  onRemoveViaPoint?: (index: number) => void;
+  activePoints: Point[];
+  validViaPoints: ViaPoint[];
+  setLiveDragRouteCoords: (coords: [number, number][] | null) => void;
+}) {
+  const map = useMap();
+  const lastFetchTimeRef = useRef<number>(0);
+  const viaKey = `via-marker-${idx}-${via.segmentIndex}-${via.lat.toFixed(6)}-${via.lng.toFixed(6)}`;
+
+  return (
+    <Marker
+      key={viaKey}
+      position={[via.lat, via.lng]}
+      icon={createViaIcon(idx)}
+      draggable={isRouteEditMode}
+      eventHandlers={{
+        drag: (e) => {
+          if (!isRouteEditMode) return;
+          const { lat, lng } = e.target.getLatLng();
+          const now = Date.now();
+          if (now - lastFetchTimeRef.current > 500) {
+            lastFetchTimeRef.current = now;
+            const updatedVias = [...validViaPoints];
+            updatedVias[idx] = { segmentIndex: via.segmentIndex, lat, lng };
+            fetchOsrmGeometry(activePoints, updatedVias).then(coords => {
+              if (coords) setLiveDragRouteCoords(coords);
+            });
+          }
+        },
+        dragend: (e) => {
+          if (!isRouteEditMode) return;
+          const marker = e.target;
+          const { lat, lng } = marker.getLatLng();
+          if (onUpdateViaPoint) {
+            onUpdateViaPoint(idx, lat, lng, via.segmentIndex);
+          }
+        },
+      }}
+    >
+      <Popup key={`popup-${viaKey}`}>
+        <div
+          className="p-1 space-y-2 text-center min-w-[140px]"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (e.nativeEvent) {
+              e.nativeEvent.stopImmediatePropagation();
+              e.nativeEvent.stopPropagation();
+            }
+          }}
+        >
+          <p className="text-xs font-bold text-amber-600 dark:text-amber-400">
+            Punkt trasowania #{idx + 1} (Odcinek {via.segmentIndex + 1})
+          </p>
+          <p className="text-[10px] text-zinc-500">
+            {isRouteEditMode ? 'Przeciągaj punkt po mapie, aby płynnie zagiąć trasę.' : 'Włącz tryb edycji trasy, aby przesuwać/usuwać.'}
+          </p>
+          {isRouteEditMode && onRemoveViaPoint && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                if (e.nativeEvent) {
+                  e.nativeEvent.stopImmediatePropagation();
+                  e.nativeEvent.stopPropagation();
+                }
+                try {
+                  map.closePopup();
+                } catch (err) {
+                  // ignore
+                }
+                onRemoveViaPoint(idx);
+              }}
+              className="w-full py-1 px-2 bg-rose-500 text-white rounded text-[11px] font-bold hover:bg-rose-600 transition flex items-center justify-center gap-1 cursor-pointer"
+            >
+              <Trash2 className="w-3 h-3" />
+              <span>Usuń ten punkt</span>
+            </button>
+          )}
+        </div>
+      </Popup>
+    </Marker>
+  );
+}
+
 export default function MapComponent({
   points = [],
   activePoints = [],
@@ -390,10 +572,16 @@ export default function MapComponent({
 }: MapComponentProps) {
   const [isMounted, setIsMounted] = useState(false);
   const [mapTileStyle, setMapTileStyle] = useState<'streets' | 'satellite'>('streets');
+  const [liveDragRouteCoords, setLiveDragRouteCoords] = useState<[number, number][] | null>(null);
 
   useEffect(() => {
     setIsMounted(true);
   }, []);
+
+  // Seamless handoff: Clear live drag preview once main routeCoordinates updates from parent
+  useEffect(() => {
+    setLiveDragRouteCoords(null);
+  }, [routeCoordinates]);
 
   const defaultCenter: [number, number] = [52.0693, 19.4803];
   const defaultZoom = 7;
@@ -421,6 +609,9 @@ export default function MapComponent({
   }, [viaPoints, validActivePoints]);
 
   const activePolylineCoords = useMemo<[number, number][]>(() => {
+    if (liveDragRouteCoords && liveDragRouteCoords.length > 0) {
+      return liveDragRouteCoords;
+    }
     if (validRouteCoordinates.length > 0) {
       return validRouteCoordinates;
     }
@@ -428,7 +619,52 @@ export default function MapComponent({
       return validActivePoints.map(p => [p.lat, p.lng] as [number, number]);
     }
     return [];
-  }, [validRouteCoordinates, validActivePoints]);
+  }, [liveDragRouteCoords, validRouteCoordinates, validActivePoints]);
+
+  const segmentPolylines = useMemo<[number, number][][]>(() => {
+    if (validActivePoints.length < 2) return [];
+
+    const baseCoords = liveDragRouteCoords && liveDragRouteCoords.length > 0
+      ? liveDragRouteCoords
+      : validRouteCoordinates;
+
+    if (baseCoords.length > 0) {
+      const splitIndices: number[] = [0];
+      for (let i = 1; i < validActivePoints.length - 1; i++) {
+        const p = validActivePoints[i];
+        let minDist = Infinity;
+        let bestIdx = splitIndices[splitIndices.length - 1];
+        for (let j = bestIdx; j < baseCoords.length; j++) {
+          const c = baseCoords[j];
+          const distSq = (c[0] - p.lat) * (c[0] - p.lat) + (c[1] - p.lng) * (c[1] - p.lng);
+          if (distSq < minDist) {
+            minDist = distSq;
+            bestIdx = j;
+          }
+        }
+        splitIndices.push(bestIdx);
+      }
+      splitIndices.push(baseCoords.length - 1);
+
+      const result: [number, number][][] = [];
+      for (let i = 0; i < validActivePoints.length - 1; i++) {
+        const startIdx = splitIndices[i];
+        const endIdx = splitIndices[i + 1];
+        const coords = baseCoords.slice(startIdx, endIdx + 1);
+        result.push(coords.length > 0 ? coords : [[validActivePoints[i].lat, validActivePoints[i].lng], [validActivePoints[i + 1].lat, validActivePoints[i + 1].lng]]);
+      }
+      return result;
+    }
+
+    const result: [number, number][][] = [];
+    for (let i = 0; i < validActivePoints.length - 1; i++) {
+      result.push([
+        [validActivePoints[i].lat, validActivePoints[i].lng],
+        [validActivePoints[i + 1].lat, validActivePoints[i + 1].lng]
+      ]);
+    }
+    return result;
+  }, [liveDragRouteCoords, validRouteCoordinates, validActivePoints]);
 
   const getActiveIndex = (pointId: number) => {
     return validActivePoints.findIndex(p => p.id === pointId);
@@ -483,7 +719,7 @@ export default function MapComponent({
               }`}
           >
             <Sliders className="w-4 h-4" />
-            <span>{isRouteEditMode ? 'Tryb edycji: Przeciągaj linię trasy myszką lub punkty K1, K2...' : 'Koryguj trasę na mapie (Drag & Drop)'}</span>
+            <span>{isRouteEditMode ? 'Tryb edycji: Przeciągaj trasę w locie (Real-time Drag)' : 'Koryguj trasę na mapie (Drag & Drop)'}</span>
           </button>
           {validViaPoints.length > 0 && onClearViaPoints && (
             <button
@@ -547,14 +783,18 @@ export default function MapComponent({
           isRouteEditMode={isRouteEditMode}
           onAddViaPoint={onAddViaPoint}
           activePoints={validActivePoints}
+          segmentPolylines={segmentPolylines}
         />
         <MapFitBounds activePoints={validActivePoints} isDragging={isDragging} />
 
         <RouteRubberbandHandler
           isRouteEditMode={isRouteEditMode}
           activePolylineCoords={activePolylineCoords}
+          segmentPolylines={segmentPolylines}
           onAddViaPoint={onAddViaPoint}
           activePoints={validActivePoints}
+          validViaPoints={validViaPoints}
+          setLiveDragRouteCoords={setLiveDragRouteCoords}
         />
 
         {/* All Points Markers */}
@@ -574,62 +814,19 @@ export default function MapComponent({
           );
         })}
 
-        {/* Draggable Route Via-Points (Corrections) */}
+        {/* Draggable Route Via-Points (Google Maps style dynamic waypoint nodes) */}
         {validViaPoints.map((via, idx) => (
-          <Marker
-            key={`via-point-marker-${idx}`}
-            position={[via.lat, via.lng]}
-            icon={createViaIcon(idx)}
-            draggable={isRouteEditMode}
-            eventHandlers={{
-              dragend: (e) => {
-                if (!isRouteEditMode) return;
-                const marker = e.target;
-                const { lat, lng } = marker.getLatLng();
-                if (onUpdateViaPoint) {
-                  onUpdateViaPoint(idx, lat, lng, via.segmentIndex);
-                }
-              },
-            }}
-          >
-            <Popup key={`via-popup-${idx}`}>
-              <div
-                className="p-1 space-y-2 text-center min-w-[140px]"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (e.nativeEvent) {
-                    e.nativeEvent.stopImmediatePropagation();
-                    e.nativeEvent.stopPropagation();
-                  }
-                }}
-              >
-                <p className="text-xs font-bold text-amber-600 dark:text-amber-400">
-                  Korekta trasowania #{idx + 1} (Odcinek {via.segmentIndex + 1})
-                </p>
-                <p className="text-[10px] text-zinc-500">
-                  {isRouteEditMode ? 'Możesz przeciągać ten punkt po mapie' : 'Włącz tryb edycji trasy, aby przesuwać/usuwać.'}
-                </p>
-                {isRouteEditMode && onRemoveViaPoint && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      if (e.nativeEvent) {
-                        e.nativeEvent.stopImmediatePropagation();
-                        e.nativeEvent.stopPropagation();
-                      }
-                      onRemoveViaPoint(idx);
-                    }}
-                    className="w-full py-1 px-2 bg-rose-500 text-white rounded text-[11px] font-bold hover:bg-rose-600 transition flex items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    <span>Usuń tę korektę</span>
-                  </button>
-                )}
-              </div>
-            </Popup>
-          </Marker>
+          <ViaPointMarker
+            key={`via-${idx}-${via.segmentIndex}-${via.lat.toFixed(6)}-${via.lng.toFixed(6)}`}
+            via={via}
+            idx={idx}
+            isRouteEditMode={isRouteEditMode}
+            onUpdateViaPoint={onUpdateViaPoint}
+            onRemoveViaPoint={onRemoveViaPoint}
+            activePoints={validActivePoints}
+            validViaPoints={validViaPoints}
+            setLiveDragRouteCoords={setLiveDragRouteCoords}
+          />
         ))}
 
         {/* Persistent Driving / Fallback Route Polyline */}
@@ -677,3 +874,4 @@ export default function MapComponent({
     </div>
   );
 }
+
