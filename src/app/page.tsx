@@ -1666,13 +1666,12 @@ export default function Dashboard() {
   return (
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-50 transition-colors duration-200 select-none">
 
-      {/* 1. NATIVE DESKTOP TITLE BAR */}
+      {/* 1. HEADER / TOOLBAR */}
       <header
-        data-tauri-drag-region
         className="h-11 bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between px-3.5 text-sm select-none z-50 flex-shrink-0"
       >
         {/* Left App Brand */}
-        <div className="flex items-center gap-2.5" data-tauri-no-drag>
+        <div className="flex items-center gap-2.5">
           <div className="bg-emerald-500 text-white p-1.5 rounded-lg shadow-sm shadow-emerald-500/20">
             <Route className="w-4 h-4" />
           </div>
@@ -1684,14 +1683,14 @@ export default function Dashboard() {
           </span>
         </div>
 
-        {/* Center Window Drag Region Title */}
-        <div data-tauri-drag-region className="hidden md:flex items-center gap-2 text-zinc-500 dark:text-zinc-400 font-medium text-xs cursor-default">
+        {/* Center Title */}
+        <div className="hidden md:flex items-center gap-2 text-zinc-500 dark:text-zinc-400 font-medium text-xs cursor-default">
           <Compass className="w-4 h-4" />
           <span>Lokalny Optymalizator Tras & Macierz OSRM</span>
         </div>
 
-        {/* Right Action Controls & Desktop Window Buttons */}
-        <div className="flex items-center gap-2" data-tauri-no-drag>
+        {/* Right Action Controls */}
+        <div className="flex items-center gap-2">
           {/* OSRM Status */}
           <div className="hidden sm:flex items-center gap-1.5 bg-zinc-100 dark:bg-zinc-800/80 px-2.5 py-1 rounded-full border border-zinc-200/80 dark:border-zinc-700/80 text-xs font-semibold text-zinc-600 dark:text-zinc-300">
             <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
