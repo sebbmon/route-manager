@@ -1033,6 +1033,8 @@ export default function Dashboard() {
   // Real-time Distance Summing & Step Distances from IndexedDB
   useEffect(() => {
     const calcDistance = async () => {
+      if (viaPoints.length > 0) return;
+
       if (activePointIds.length < 2) {
         setTotalDistance(0);
         setStepDistances({});
@@ -1061,7 +1063,7 @@ export default function Dashboard() {
     };
 
     calcDistance();
-  }, [activePointIds, points]);
+  }, [activePointIds, points, viaPoints]);
 
   // All points belonging to the currently active route
   const activeRoutePoints = useMemo(() => {
