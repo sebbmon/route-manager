@@ -131,6 +131,7 @@ export interface RouteHistory {
   pointsOrder: number[]; // Array of Point IDs
   totalDistance: number;
   viaPoints?: ViaPoint[] | [number, number][]; // Custom route via points with segment index (or legacy [lat, lng][])
+  savedRouteName?: string; // Name of the route/folder that these points belong to
 }
 
 export class RoutePlannerDatabase extends Dexie {

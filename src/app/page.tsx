@@ -409,6 +409,23 @@ export default function Dashboard() {
   const isSkipViaPointResetRef = useRef(false);
   const prevActivePointIdsRef = useRef<number[]>(activePointIds);
 
+  const prevActiveRouteIdRef = useRef<number | null>(activeRouteId);
+
+  // Automatically reset planning state when user switches the active route folder
+  useEffect(() => {
+    if (prevActiveRouteIdRef.current !== null && prevActiveRouteIdRef.current !== activeRouteId) {
+      setActivePointIds([]);
+      setRouteName('');
+      setLoadedRouteId(null);
+      setRouteCoordinates([]);
+      setTotalDistance(0);
+      setStepDistances({});
+      setViaPoints([]);
+      setIsRouteEditMode(false);
+    }
+    prevActiveRouteIdRef.current = activeRouteId;
+  }, [activeRouteId]);
+
   // Route edit mode & via-points are automatically reset whenever active route or active points order changes
   useEffect(() => {
     setIsRouteEditMode(false);
@@ -432,6 +449,10 @@ export default function Dashboard() {
   }, [activePointIds, activeRouteId]);
 
   const handleToggleRouteEditMode = () => {
+    if (activePointIds.length < 2) {
+      showStatusMessage('Korekta trasy jest możliwa dopiero przy co najmniej 2 punktach w trasie!', 'error');
+      return;
+    }
     setIsRouteEditMode(prev => !prev);
   };
 
@@ -1560,6 +1581,31 @@ export default function Dashboard() {
     return () => window.removeEventListener('pointerup', handleGlobalPointerUp);
   }, []);
 
+  // Helper to determine the parent route name(s) for a history item based on its points or stored route name
+  const getRouteNameForHistoryItem = (route: RouteHistory): string => {
+    const matchingPoints = route.pointsOrder
+      .map(id => points.find(p => p.id === id))
+      .filter((p): p is Point => !!p);
+
+    const routeIds = Array.from(
+      new Set(matchingPoints.map(p => p.routeId).filter((id): id is number => id !== undefined))
+    );
+
+    const routeNames = routeIds
+      .map(rId => savedUserRoutes.find(r => r.id === rId)?.name)
+      .filter((name): name is string => !!name);
+
+    if (routeNames.length > 0) {
+      return routeNames.join(', ');
+    }
+
+    if (route.savedRouteName) {
+      return route.savedRouteName;
+    }
+
+    return activeRoute?.name || 'Główna Trasa';
+  };
+
   // Save Route to History (as new)
   const handleSaveRoute = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -1573,12 +1619,14 @@ export default function Dashboard() {
     }
 
     try {
+      const currentRouteFolderName = activeRoute?.name || (savedUserRoutes.length > 0 ? savedUserRoutes[0].name : undefined);
       const newId = await db.routes_history.add({
         routeName: routeName.trim(),
         date: new Date().toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }),
         pointsOrder: [...activePointIds],
         totalDistance,
-        viaPoints: viaPoints.length > 0 ? [...viaPoints] : undefined
+        viaPoints: viaPoints.length > 0 ? [...viaPoints] : undefined,
+        savedRouteName: currentRouteFolderName
       });
       setLoadedRouteId(newId as number);
       showStatusMessage('Zapisano trasę jako nową w historii!', 'success');
@@ -1602,12 +1650,14 @@ export default function Dashboard() {
     }
 
     try {
+      const currentRouteFolderName = activeRoute?.name || (savedUserRoutes.length > 0 ? savedUserRoutes[0].name : undefined);
       await db.routes_history.update(loadedRouteId, {
         routeName: routeName.trim(),
         date: new Date().toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }),
         pointsOrder: [...activePointIds],
         totalDistance,
-        viaPoints: viaPoints.length > 0 ? [...viaPoints] : undefined
+        viaPoints: viaPoints.length > 0 ? [...viaPoints] : undefined,
+        savedRouteName: currentRouteFolderName
       });
       showStatusMessage(`Zaktualizowano trasę "${routeName.trim()}" w historii!`, 'success');
     } catch (err) {
@@ -2248,10 +2298,11 @@ export default function Dashboard() {
                         <button
                           type="button"
                           onClick={handleToggleRouteEditMode}
-                          title="Włącz lub wyłącz tryb edycji/korekty trasy na mapie"
-                          className={`text-[11px] font-bold h-7 w-[92px] rounded-lg transition flex items-center justify-center gap-1 cursor-pointer flex-shrink-0 ${isRouteEditMode
-                            ? 'bg-amber-500 text-white shadow-md'
-                            : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20'
+                          disabled={activePointIds.length < 2}
+                          title={activePointIds.length < 2 ? "Korekta trasy jest możliwa dopiero przy co najmniej 2 punktach" : "Włącz lub wyłącz tryb edycji/korekty trasy na mapie"}
+                          className={`text-[11px] font-bold h-7 w-[92px] rounded-lg transition flex items-center justify-center gap-1 flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${isRouteEditMode
+                            ? 'bg-amber-500 text-white shadow-md cursor-pointer'
+                            : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 cursor-pointer disabled:hover:bg-amber-500/10'
                             }`}
                         >
                           <Sliders className="w-3 h-3 flex-shrink-0" />
@@ -2520,6 +2571,7 @@ export default function Dashboard() {
                   ) : (
                     [...savedRoutes].reverse().map(route => {
                       if (route.id === undefined) return null;
+                      const parentRouteName = getRouteNameForHistoryItem(route);
                       return (
                         <div
                           key={route.id}
@@ -2531,9 +2583,9 @@ export default function Dashboard() {
                               {route.routeName}
                             </p>
                             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 font-medium flex items-center gap-2">
-                              <span>{route.date}</span>
+                              <span className="truncate max-w-[200px]" title={parentRouteName}>{parentRouteName}</span>
                               <span>•</span>
-                              <span>{route.pointsOrder.length} punktów w trasie</span>
+                              <span className="flex-shrink-0">{route.pointsOrder.length} punktów w trasie</span>
                             </p>
                           </div>
 
