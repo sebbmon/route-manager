@@ -406,15 +406,29 @@ export default function Dashboard() {
   const [isRouteEditMode, setIsRouteEditMode] = useState(false);
   const [viaPoints, setViaPoints] = useState<ViaPoint[]>([]);
 
-  // Route edit mode & via-points are automatically reset whenever active route or active points selection changes
+  const isSkipViaPointResetRef = useRef(false);
+  const prevActivePointIdsRef = useRef<number[]>(activePointIds);
+
+  // Route edit mode & via-points are automatically reset whenever active route or active points order changes
   useEffect(() => {
     setIsRouteEditMode(false);
-    if (activePointIds.length < 2) {
-      setViaPoints([]);
-    } else {
-      const maxSegmentIndex = activePointIds.length - 2;
-      setViaPoints(prev => prev.filter(v => typeof v.segmentIndex === 'number' && v.segmentIndex <= maxSegmentIndex));
+
+    if (isSkipViaPointResetRef.current) {
+      isSkipViaPointResetRef.current = false;
+      prevActivePointIdsRef.current = activePointIds;
+      return;
     }
+
+    const prevIds = prevActivePointIdsRef.current;
+    const isChanged =
+      prevIds.length !== activePointIds.length ||
+      prevIds.some((id, idx) => id !== activePointIds[idx]);
+
+    if (isChanged) {
+      setViaPoints([]);
+    }
+
+    prevActivePointIdsRef.current = activePointIds;
   }, [activePointIds, activeRouteId]);
 
   const handleToggleRouteEditMode = () => {
@@ -1014,9 +1028,34 @@ export default function Dashboard() {
           const parsedCoords = data.routes[0].geometry.coordinates.map((c: [number, number]) => [c[1], c[0]] as [number, number]);
           setRouteCoordinates(parsedCoords);
 
-          if (viaPoints.length > 0 && data.routes[0].distance !== undefined) {
+          if (data.routes[0].distance !== undefined) {
             const distanceKm = Math.round((data.routes[0].distance / 1000) * 10) / 10;
             setTotalDistance(distanceKm);
+          }
+
+          if (data.routes[0].legs && Array.isArray(data.routes[0].legs)) {
+            const newSteps: Record<string, number> = {};
+            let legIdx = 0;
+            for (let i = 0; i < activePoints.length - 1; i++) {
+              const p1 = activePoints[i];
+              const p2 = activePoints[i + 1];
+              const segVias = normalizedVias.filter(v => v.segmentIndex === i);
+              const numLegs = 1 + segVias.length;
+
+              let segMeters = 0;
+              for (let l = 0; l < numLegs; l++) {
+                if (data.routes[0].legs[legIdx]) {
+                  segMeters += data.routes[0].legs[legIdx].distance || 0;
+                }
+                legIdx++;
+              }
+              const segKm = Math.round((segMeters / 1000) * 10) / 10;
+              if (p1.id !== undefined && p2.id !== undefined) {
+                newSteps[`${p1.id}-${p2.id}`] = segKm;
+              }
+              newSteps[`seg-${i}`] = segKm;
+            }
+            setStepDistances(prev => ({ ...prev, ...newSteps }));
           }
         } else {
           setRouteCoordinates([]);
@@ -1033,10 +1072,8 @@ export default function Dashboard() {
   // Real-time Distance Summing & Step Distances from IndexedDB
   useEffect(() => {
     const calcDistance = async () => {
-      if (viaPoints.length > 0) return;
-
       if (activePointIds.length < 2) {
-        setTotalDistance(0);
+        if (viaPoints.length === 0) setTotalDistance(0);
         setStepDistances({});
         return;
       }
@@ -1053,13 +1090,17 @@ export default function Dashboard() {
         if (entry) {
           sum += entry.distanceKm;
           steps[key] = entry.distanceKm;
+          steps[`seg-${i}`] = entry.distanceKm;
         } else {
           steps[key] = 0;
+          steps[`seg-${i}`] = 0;
         }
       }
 
-      setTotalDistance(Math.round(sum * 10) / 10);
-      setStepDistances(steps);
+      if (viaPoints.length === 0) {
+        setTotalDistance(Math.round(sum * 10) / 10);
+      }
+      setStepDistances(prev => ({ ...steps, ...prev }));
     };
 
     calcDistance();
@@ -1580,6 +1621,7 @@ export default function Dashboard() {
     if (route.id === undefined) return;
     const validIds = route.pointsOrder.filter(id => points.some(p => p.id === id));
     const loadedActivePoints = validIds.map(id => points.find(p => p.id === id)).filter((p): p is Point => !!p);
+    isSkipViaPointResetRef.current = true;
     setActivePointIds(validIds);
     setRouteName(route.routeName);
     setLoadedRouteId(route.id);
@@ -2238,10 +2280,13 @@ export default function Dashboard() {
                         const isMoveUpDisabled = isFirst || (isHasReturnLeg && (index === 1 || isLast));
                         const isMoveDownDisabled = isLast || (isHasReturnLeg && (isFirst || index === activePointIds.length - 2));
 
+                        const segViaCount = viaPoints.filter(v => v.segmentIndex === index).length;
+                        const hasWaypointsOnSeg = segViaCount > 0;
+
                         let nextStepKm: number | undefined = undefined;
                         if (!isLast) {
                           const nextPointId = activePointIds[index + 1];
-                          nextStepKm = stepDistances[`${point.id}-${nextPointId}`];
+                          nextStepKm = stepDistances[`seg-${index}`] ?? stepDistances[`${point.id}-${nextPointId}`];
                         }
 
                         const isBeingDragged = activeDragIndex === index;
@@ -2322,27 +2367,32 @@ export default function Dashboard() {
                             </div>
 
                             {!isLast && (
-                              <div className="flex items-center justify-between pl-7 pr-1 h-7 my-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                              <div className={`flex items-center justify-between pl-7 pr-1 h-7 my-0.5 text-xs font-semibold ${hasWaypointsOnSeg
+                                ? 'text-amber-600 dark:text-amber-400'
+                                : 'text-emerald-600 dark:text-emerald-400'
+                                }`}>
                                 <div className="flex items-center">
                                   <div className="w-0.5 h-4 bg-zinc-300 dark:bg-zinc-700 mr-2"></div>
                                   <ChevronRight className="w-3.5 h-3.5 mr-0.5 flex-shrink-0" />
                                   {nextStepKm !== undefined ? (
-                                    <span>+ {nextStepKm.toFixed(1)} km (odcinek)</span>
+                                    <span className={hasWaypointsOnSeg ? 'font-bold text-amber-600 dark:text-amber-400' : ''}>
+                                      + {nextStepKm.toFixed(1)} km (odcinek)
+                                    </span>
                                   ) : (
                                     <span className="text-zinc-400 text-[11px]">Odcinek {index + 1}</span>
                                   )}
                                 </div>
-                                {viaPoints.filter(v => v.segmentIndex === index).length > 0 ? (
+                                {hasWaypointsOnSeg ? (
                                   <span
-                                    title={`Dodano ${viaPoints.filter(v => v.segmentIndex === index).length} waypoint(y) na tym odcinku`}
+                                    title={`Dodano ${segViaCount} waypoint(y) na tym odcinku`}
                                     className="text-[10px] leading-tight bg-amber-500/15 text-amber-600 dark:text-amber-400 font-extrabold px-2 py-0.5 rounded-full border border-amber-500/30 flex items-center gap-1 select-none flex-shrink-0"
                                   >
                                     <span>📍</span>
                                     <span>
-                                      {viaPoints.filter(v => v.segmentIndex === index).length}{' '}
-                                      {viaPoints.filter(v => v.segmentIndex === index).length === 1
+                                      {segViaCount}{' '}
+                                      {segViaCount === 1
                                         ? 'waypoint'
-                                        : viaPoints.filter(v => v.segmentIndex === index).length < 5
+                                        : segViaCount < 5
                                           ? 'waypointy'
                                           : 'waypointów'}
                                     </span>
