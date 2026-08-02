@@ -10,6 +10,7 @@ import {
   RouteHistory,
   SavedRoute,
   ViaPoint,
+  Employee,
   findNearestSegmentIndex,
   normalizeViaPoints,
   sortViaPointsForSegment,
@@ -61,7 +62,10 @@ import {
   FileJson,
   ExternalLink,
   QrCode,
-  Copy
+  Copy,
+  User,
+  UserPlus,
+  Users
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 
@@ -158,6 +162,41 @@ export default function Dashboard() {
   const savedRoutes = useLiveQuery(() => db.routes_history.toArray()) || [];
   const savedUserRoutesQuery = useLiveQuery(() => db.routes.toArray());
   const savedUserRoutes = useMemo(() => savedUserRoutesQuery || [], [savedUserRoutesQuery]);
+  const employeesQuery = useLiveQuery(() => db.employees.toArray());
+  const employees = useMemo(() => employeesQuery || [], [employeesQuery]);
+
+  // Employee management state & handlers
+  const [newEmployeeName, setNewEmployeeName] = useState('');
+  const [selectedEmployeeName, setSelectedEmployeeName] = useState<string>('');
+  const [isPlanEmployeeSelectOpen, setIsPlanEmployeeSelectOpen] = useState(false);
+  const [isEditRouteEmployeeSelectOpen, setIsEditRouteEmployeeSelectOpen] = useState(false);
+
+  const handleAddEmployee = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newEmployeeName.trim()) return;
+    try {
+      await db.employees.add({ name: newEmployeeName.trim() });
+      showStatusMessage(`Dodano pracownika: ${newEmployeeName.trim()}`, 'success');
+      setNewEmployeeName('');
+    } catch (err) {
+      console.error(err);
+      showStatusMessage('Błąd podczas dodawania pracownika.', 'error');
+    }
+  };
+
+  const handleDeleteEmployee = async (id?: number, name?: string) => {
+    if (id === undefined) return;
+    try {
+      await db.employees.delete(id);
+      showStatusMessage(`Usunięto pracownika${name ? `: ${name}` : ''}.`, 'success');
+      if (selectedEmployeeName === name) {
+        setSelectedEmployeeName('');
+      }
+    } catch (err) {
+      console.error(err);
+      showStatusMessage('Błąd podczas usuwania pracownika.', 'error');
+    }
+  };
 
   // Active Route Folder state
   const [activeRouteId, setActiveRouteId] = useState<number | null>(null);
@@ -416,6 +455,7 @@ export default function Dashboard() {
     if (prevActiveRouteIdRef.current !== null && prevActiveRouteIdRef.current !== activeRouteId) {
       setActivePointIds([]);
       setRouteName('');
+      setSelectedEmployeeName('');
       setLoadedRouteId(null);
       setRouteCoordinates([]);
       setTotalDistance(0);
@@ -519,6 +559,7 @@ export default function Dashboard() {
   // Modal editing route in history state
   const [editingRoute, setEditingRoute] = useState<RouteHistory | null>(null);
   const [editRouteName, setEditRouteName] = useState('');
+  const [editEmployeeName, setEditEmployeeName] = useState('');
   const [updatePointsWithActive, setUpdatePointsWithActive] = useState(false);
 
   // Modal deleting route state
@@ -582,6 +623,7 @@ export default function Dashboard() {
   const handleClearActiveRoute = () => {
     setActivePointIds([]);
     setRouteName('');
+    setSelectedEmployeeName('');
     setLoadedRouteId(null);
     setRouteCoordinates([]);
     setTotalDistance(0);
@@ -1622,6 +1664,7 @@ export default function Dashboard() {
       const currentRouteFolderName = activeRoute?.name || (savedUserRoutes.length > 0 ? savedUserRoutes[0].name : undefined);
       const newId = await db.routes_history.add({
         routeName: routeName.trim(),
+        employeeName: selectedEmployeeName.trim() || undefined,
         date: new Date().toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }),
         pointsOrder: [...activePointIds],
         totalDistance,
@@ -1653,6 +1696,7 @@ export default function Dashboard() {
       const currentRouteFolderName = activeRoute?.name || (savedUserRoutes.length > 0 ? savedUserRoutes[0].name : undefined);
       await db.routes_history.update(loadedRouteId, {
         routeName: routeName.trim(),
+        employeeName: selectedEmployeeName.trim() || undefined,
         date: new Date().toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }),
         pointsOrder: [...activePointIds],
         totalDistance,
@@ -1674,6 +1718,7 @@ export default function Dashboard() {
     isSkipViaPointResetRef.current = true;
     setActivePointIds(validIds);
     setRouteName(route.routeName);
+    setSelectedEmployeeName(route.employeeName || '');
     setLoadedRouteId(route.id);
     setViaPoints(normalizeViaPoints(route.viaPoints, loadedActivePoints));
     setActiveTab('route');
@@ -1687,6 +1732,7 @@ export default function Dashboard() {
     if (route.id === undefined) return;
     setEditingRoute(route);
     setEditRouteName(route.routeName);
+    setEditEmployeeName(route.employeeName || '');
     setUpdatePointsWithActive(false);
   };
 
@@ -1700,7 +1746,8 @@ export default function Dashboard() {
 
     try {
       const updateData: Partial<RouteHistory> = {
-        routeName: editRouteName.trim()
+        routeName: editRouteName.trim(),
+        employeeName: editEmployeeName.trim() || undefined
       };
 
       if (updatePointsWithActive) {
@@ -1717,6 +1764,7 @@ export default function Dashboard() {
 
       if (loadedRouteId === editingRoute.id) {
         setRouteName(editRouteName.trim());
+        setSelectedEmployeeName(editEmployeeName.trim() || '');
       }
 
       setEditingRoute(null);
@@ -2510,14 +2558,91 @@ export default function Dashboard() {
                         )}
 
                         <div className="space-y-2">
-                          <input
-                            type="text"
-                            required
-                            placeholder="Nazwa trasy (np. Poniedziałek Północ)..."
-                            value={routeName}
-                            onChange={e => setRouteName(e.target.value)}
-                            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 transition select-text font-medium"
-                          />
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              required
+                              placeholder="Nazwa trasy (np. Poniedziałek Północ)..."
+                              value={routeName}
+                              onChange={e => setRouteName(e.target.value)}
+                              className="flex-1 min-w-0 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 transition select-text font-medium"
+                            />
+                            <div className="relative w-44 flex-shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => setIsPlanEmployeeSelectOpen(prev => !prev)}
+                                className={`w-full px-2.5 py-2 rounded-lg border text-xs font-bold transition flex items-center justify-between gap-1 cursor-pointer ${selectedEmployeeName
+                                  ? 'bg-indigo-500/10 border-indigo-500/40 text-indigo-700 dark:text-indigo-300'
+                                  : 'bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300 dark:hover:border-zinc-600'
+                                  }`}
+                                title="Wybierz pracownika przypisanego do trasy (opcjonalnie)"
+                              >
+                                <div className="flex items-center gap-1.5 min-w-0 pr-1">
+                                  <User className={`w-3.5 h-3.5 flex-shrink-0 ${selectedEmployeeName ? 'text-indigo-500' : 'text-zinc-400'}`} />
+                                  <span className="truncate">
+                                    {selectedEmployeeName || 'Pracownik'}
+                                  </span>
+                                </div>
+                                <ChevronDown className={`w-3.5 h-3.5 text-zinc-400 transition-transform duration-200 flex-shrink-0 ${isPlanEmployeeSelectOpen ? 'rotate-180 text-indigo-500' : ''}`} />
+                              </button>
+
+                              {isPlanEmployeeSelectOpen && (
+                                <>
+                                  <div
+                                    className="fixed inset-0 z-40 cursor-default"
+                                    onClick={() => setIsPlanEmployeeSelectOpen(false)}
+                                  />
+
+                                  <div className="absolute left-0 right-0 top-full mt-1.5 w-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-2xl z-50 overflow-hidden divide-y divide-zinc-100 dark:divide-zinc-800/60 max-h-[220px] overflow-y-auto animate-scale-up p-1 space-y-0.5 text-left">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedEmployeeName('');
+                                        setIsPlanEmployeeSelectOpen(false);
+                                      }}
+                                      className={`w-full text-left px-2.5 py-2 rounded-lg text-xs font-medium transition flex items-center justify-between gap-2 cursor-pointer ${!selectedEmployeeName
+                                        ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 font-bold'
+                                        : 'hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 dark:text-zinc-400'
+                                        }`}
+                                    >
+                                      <span className="italic">-- Brak pracownika --</span>
+                                      {!selectedEmployeeName && <Check className="w-3.5 h-3.5 text-zinc-400" />}
+                                    </button>
+
+                                    {employees.length === 0 ? (
+                                      <div className="px-2.5 py-2 text-[11px] text-zinc-400 italic">
+                                        Brak pracowników w Ustawieniach.
+                                      </div>
+                                    ) : (
+                                      employees.map(emp => {
+                                        const isSelected = selectedEmployeeName === emp.name;
+                                        return (
+                                          <button
+                                            key={emp.id}
+                                            type="button"
+                                            onClick={() => {
+                                              setSelectedEmployeeName(emp.name);
+                                              setIsPlanEmployeeSelectOpen(false);
+                                            }}
+                                            className={`w-full text-left px-2.5 py-2 rounded-lg text-xs font-medium transition flex items-center justify-between gap-2 cursor-pointer ${isSelected
+                                              ? 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 font-bold border border-indigo-500/30'
+                                              : 'hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
+                                              }`}
+                                          >
+                                            <div className="flex items-center gap-2 min-w-0 pr-1">
+                                              <User className={`w-3.5 h-3.5 flex-shrink-0 ${isSelected ? 'text-indigo-500' : 'text-zinc-400'}`} />
+                                              <span className="truncate">{emp.name}</span>
+                                            </div>
+                                            {isSelected && <Check className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />}
+                                          </button>
+                                        );
+                                      })
+                                    )}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          </div>
 
                           <div className="flex gap-2">
                             {loadedRouteId ? (
@@ -2576,21 +2701,30 @@ export default function Dashboard() {
                         <div
                           key={route.id}
                           onClick={() => handleLoadRoute(route)}
-                          className="p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-950/40 dark:hover:bg-zinc-850 transition cursor-pointer group flex items-center justify-between gap-3"
+                          className="px-3.5 py-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-950/40 dark:hover:bg-zinc-850 transition cursor-pointer group flex items-center justify-between gap-3 min-h-[64px]"
                         >
-                          <div className="min-w-0 text-left flex-1">
-                            <p className="text-sm font-extrabold text-zinc-900 dark:text-zinc-100 group-hover:text-emerald-500 transition-colors truncate">
+                          <div className="min-w-0 text-left flex-1 flex flex-col justify-center">
+                            <p className="text-sm font-extrabold text-zinc-900 dark:text-zinc-100 group-hover:text-emerald-500 transition-colors truncate leading-tight">
                               {route.routeName}
                             </p>
-                            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 font-medium flex items-center gap-2">
-                              <span className="truncate max-w-[200px]" title={parentRouteName}>{parentRouteName}</span>
-                              <span>•</span>
-                              <span className="flex-shrink-0">{route.pointsOrder.length} punktów w trasie</span>
-                            </p>
+                            <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-1.5 font-medium flex items-center gap-1.5 flex-nowrap min-w-0 leading-none">
+                              {route.employeeName && (
+                                <>
+                                  <span className="inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400 font-bold bg-indigo-500/10 px-1.5 py-0.5 rounded text-[11px] leading-none flex-shrink-0" title={`Pracownik: ${route.employeeName}`}>
+                                    <User className="w-3 h-3 flex-shrink-0" />
+                                    <span className="truncate max-w-[110px]">{route.employeeName}</span>
+                                  </span>
+                                  <span className="text-zinc-300 dark:text-zinc-700 flex-shrink-0">•</span>
+                                </>
+                              )}
+                              <span className="truncate max-w-[130px]" title={parentRouteName}>{parentRouteName}</span>
+                              <span className="text-zinc-300 dark:text-zinc-700 flex-shrink-0">•</span>
+                              <span className="flex-shrink-0">{route.pointsOrder.length} pkt</span>
+                            </div>
                           </div>
 
-                          <div className="flex items-center gap-3 flex-shrink-0">
-                            <span className="text-sm font-black text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 dark:bg-emerald-500/15 px-3 py-1 rounded-lg border border-emerald-500/20">
+                          <div className="flex items-center gap-2.5 flex-shrink-0">
+                            <span className="text-sm font-black text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 dark:bg-emerald-500/15 px-3 py-1.5 rounded-xl border border-emerald-500/20 leading-none">
                               {route.totalDistance.toFixed(1)} km
                             </span>
 
@@ -2626,8 +2760,69 @@ export default function Dashboard() {
             {activeTab === 'backup' && (
               <div className="space-y-4 animate-fade-in">
                 <span className="text-sm font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider block px-1">
-                  Kopia Zapasowa i Przywracanie Bazy (JSON)
+                  Ustawienia i Kopia Zapasowa
                 </span>
+
+                {/* Card 0: Zarządzanie Pracownikami */}
+                <div className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/40 space-y-3 text-left">
+                  <div className="flex items-start gap-3">
+                    <div className="p-2 bg-emerald-500/10 text-emerald-500 rounded-lg flex-shrink-0">
+                      <Users className="w-5 h-5" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-bold text-zinc-900 dark:text-zinc-100">
+                        Zarządzanie Pracownikami
+                      </h4>
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                        Dodawaj imiona pracowników, które będzie można przypisywać do zapisywanych tras.
+                      </p>
+                    </div>
+                  </div>
+
+                  <form onSubmit={handleAddEmployee} className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="Imię pracownika (np. Jan Kowalski)..."
+                      value={newEmployeeName}
+                      onChange={e => setNewEmployeeName(e.target.value)}
+                      className="flex-1 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 transition select-text"
+                    />
+                    <button
+                      type="submit"
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <UserPlus className="w-4 h-4" />
+                      <span>Dodaj</span>
+                    </button>
+                  </form>
+
+                  {/* List of employees */}
+                  <div className="space-y-1.5 pt-1 max-h-[160px] overflow-y-auto pr-1">
+                    {employees.length === 0 ? (
+                      <p className="text-xs text-zinc-400 italic">Brak dodanych pracowników.</p>
+                    ) : (
+                      employees.map(emp => (
+                        <div
+                          key={emp.id}
+                          className="flex items-center justify-between p-2 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-xs font-medium"
+                        >
+                          <div className="flex items-center gap-2">
+                            <User className="w-3.5 h-3.5 text-emerald-500" />
+                            <span className="text-zinc-800 dark:text-zinc-200 font-bold">{emp.name}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteEmployee(emp.id, emp.name)}
+                            title="Usuń pracownika"
+                            className="p-1 text-zinc-400 hover:text-rose-500 hover:bg-rose-500/10 rounded transition cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
 
                 <input
                   type="file"
@@ -3252,6 +3447,89 @@ export default function Dashboard() {
                   onChange={e => setEditRouteName(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500 select-text"
                 />
+              </div>
+
+              <div className="space-y-1.5 relative">
+                <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1.5 flex items-center justify-between gap-2 h-5">
+                  <span className="truncate">Pracownik (opcjonalnie)</span>
+                  {editEmployeeName && (
+                    <span className="text-[10px] bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-bold px-2 py-0.5 rounded-full border border-indigo-500/20 flex-shrink-0">
+                      Wybrano
+                    </span>
+                  )}
+                </label>
+
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditRouteEmployeeSelectOpen(prev => !prev)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 transition flex items-center justify-between cursor-pointer text-zinc-800 dark:text-zinc-200 hover:border-indigo-500/50"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <User className={`w-4 h-4 flex-shrink-0 ${editEmployeeName ? 'text-indigo-500' : 'text-zinc-400'}`} />
+                      <span className="truncate font-bold">
+                        {editEmployeeName || '-- Brak pracownika --'}
+                      </span>
+                    </div>
+                    <ChevronDown className={`w-4 h-4 text-zinc-400 transition-transform duration-200 flex-shrink-0 ${isEditRouteEmployeeSelectOpen ? 'rotate-180 text-indigo-500' : ''}`} />
+                  </button>
+
+                  {isEditRouteEmployeeSelectOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-40 cursor-default"
+                        onClick={() => setIsEditRouteEmployeeSelectOpen(false)}
+                      />
+
+                      <div className="absolute left-0 right-0 top-full mt-1.5 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-2xl z-50 overflow-hidden divide-y divide-zinc-100 dark:divide-zinc-800/60 max-h-[200px] overflow-y-auto animate-scale-up p-1 space-y-0.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditEmployeeName('');
+                            setIsEditRouteEmployeeSelectOpen(false);
+                          }}
+                          className={`w-full text-left px-3 py-2.5 rounded-lg text-xs font-medium transition flex items-center justify-between gap-2 cursor-pointer ${!editEmployeeName
+                            ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 font-bold'
+                            : 'hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 dark:text-zinc-400'
+                            }`}
+                        >
+                          <span className="italic">-- Brak pracownika --</span>
+                          {!editEmployeeName && <Check className="w-3.5 h-3.5 text-zinc-400" />}
+                        </button>
+
+                        {employees.length === 0 ? (
+                          <div className="px-3 py-2 text-xs text-zinc-400 italic">
+                            Brak pracowników w Ustawieniach.
+                          </div>
+                        ) : (
+                          employees.map(emp => {
+                            const isSelected = editEmployeeName === emp.name;
+                            return (
+                              <button
+                                key={emp.id}
+                                type="button"
+                                onClick={() => {
+                                  setEditEmployeeName(emp.name);
+                                  setIsEditRouteEmployeeSelectOpen(false);
+                                }}
+                                className={`w-full text-left px-3 py-2.5 rounded-lg text-xs font-medium transition flex items-center justify-between gap-2 cursor-pointer ${isSelected
+                                  ? 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-bold border border-indigo-500/30'
+                                  : 'hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
+                                  }`}
+                              >
+                                <div className="flex items-center gap-2 min-w-0 pr-1">
+                                  <User className={`w-3.5 h-3.5 flex-shrink-0 ${isSelected ? 'text-indigo-500' : 'text-zinc-400'}`} />
+                                  <span className="truncate">{emp.name}</span>
+                                </div>
+                                {isSelected && <Check className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />}
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
 
               <div className="flex gap-2.5 pt-2">

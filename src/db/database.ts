@@ -124,9 +124,15 @@ export function normalizeViaPoints(
   });
 }
 
+export interface Employee {
+  id?: number;
+  name: string;
+}
+
 export interface RouteHistory {
   id?: number;
   routeName: string;
+  employeeName?: string;
   date: string;
   pointsOrder: number[]; // Array of Point IDs
   totalDistance: number;
@@ -139,6 +145,7 @@ export class RoutePlannerDatabase extends Dexie {
   distances!: Table<Distance>;
   routes_history!: Table<RouteHistory>;
   routes!: Table<SavedRoute>;
+  employees!: Table<Employee>;
 
   constructor() {
     super('RoutePlannerDatabase');
@@ -153,6 +160,14 @@ export class RoutePlannerDatabase extends Dexie {
       distances: 'id, fromId, toId, distanceKm',
       routes_history: '++id, routeName, date, totalDistance',
       routes: '++id, name, order'
+    });
+
+    this.version(3).stores({
+      points: '++id, routeId, name, lat, lng',
+      distances: 'id, fromId, toId, distanceKm',
+      routes_history: '++id, routeName, employeeName, date, totalDistance',
+      routes: '++id, name, order',
+      employees: '++id, name'
     });
   }
 }
@@ -233,6 +248,7 @@ export interface DatabaseBackupData {
   routes: SavedRoute[];
   routes_history: RouteHistory[];
   distances?: Distance[];
+  employees?: Employee[];
 }
 
 /**
@@ -243,15 +259,17 @@ export async function exportDatabaseToJSON(): Promise<DatabaseBackupData> {
   const routes = await db.routes.toArray();
   const routes_history = await db.routes_history.toArray();
   const distances = await db.distances.toArray();
+  const employees = await db.employees.toArray();
 
   return {
-    version: 2,
+    version: 3,
     appName: 'RoutePlanner',
     exportedAt: new Date().toISOString(),
     points,
     routes,
     routes_history,
     distances,
+    employees,
   };
 }
 
@@ -270,22 +288,25 @@ export async function importDatabaseFromJSON(
   const routes = Array.isArray(backupData.routes) ? backupData.routes : [];
   const routes_history = Array.isArray(backupData.routes_history) ? backupData.routes_history : [];
   const distances = Array.isArray(backupData.distances) ? backupData.distances : [];
+  const employees = Array.isArray(backupData.employees) ? backupData.employees : [];
 
   if (mode === 'overwrite') {
-    await db.transaction('rw', [db.points, db.routes, db.routes_history, db.distances], async () => {
+    await db.transaction('rw', [db.points, db.routes, db.routes_history, db.distances, db.employees], async () => {
       await db.points.clear();
       await db.routes.clear();
       await db.routes_history.clear();
       await db.distances.clear();
+      await db.employees.clear();
 
       if (points.length > 0) await db.points.bulkAdd(points);
       if (routes.length > 0) await db.routes.bulkAdd(routes);
       if (routes_history.length > 0) await db.routes_history.bulkAdd(routes_history);
       if (distances.length > 0) await db.distances.bulkAdd(distances);
+      if (employees.length > 0) await db.employees.bulkAdd(employees);
     });
   } else {
     // Merge mode: Add without clearing
-    await db.transaction('rw', [db.points, db.routes, db.routes_history, db.distances], async () => {
+    await db.transaction('rw', [db.points, db.routes, db.routes_history, db.distances, db.employees], async () => {
       if (points.length > 0) {
         // Strip IDs when merging to avoid primary key conflicts
         const cleanPoints = points.map(({ id, ...rest }) => rest);
@@ -298,6 +319,10 @@ export async function importDatabaseFromJSON(
       if (routes_history.length > 0) {
         const cleanHistory = routes_history.map(({ id, ...rest }) => rest);
         await db.routes_history.bulkAdd(cleanHistory as RouteHistory[]);
+      }
+      if (employees.length > 0) {
+        const cleanEmployees = employees.map(({ id, ...rest }) => rest);
+        await db.employees.bulkAdd(cleanEmployees as Employee[]);
       }
     });
   }
