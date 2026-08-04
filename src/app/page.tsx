@@ -1177,9 +1177,9 @@ export default function Dashboard() {
   // Map active point IDs to point objects
   const activePoints = useMemo(() => {
     return activePointIds
-      .map(id => activeRoutePoints.find(p => p.id === id))
+      .map(id => points.find(p => p.id === id))
       .filter((p): p is Point => !!p);
-  }, [activePointIds, activeRoutePoints]);
+  }, [activePointIds, points]);
 
   // Google Maps navigation segments calculation (max 10 points per segment)
   const gmapsSegments = useMemo(() => {
@@ -1713,6 +1713,33 @@ export default function Dashboard() {
   // Load past route
   const handleLoadRoute = (route: RouteHistory) => {
     if (route.id === undefined) return;
+
+    // Find target route folder ID for this historical route
+    let targetRouteId: number | undefined = undefined;
+    if (route.savedRouteName) {
+      const matchingFolder = savedUserRoutes.find(r => r.name === route.savedRouteName);
+      if (matchingFolder && matchingFolder.id !== undefined) {
+        targetRouteId = matchingFolder.id;
+      }
+    }
+
+    if (targetRouteId === undefined) {
+      const matchingPoints = route.pointsOrder
+        .map(id => points.find(p => p.id === id))
+        .filter((p): p is Point => !!p);
+      const pointRouteIds = matchingPoints
+        .map(p => p.routeId)
+        .filter((id): id is number => id !== undefined);
+      if (pointRouteIds.length > 0) {
+        targetRouteId = pointRouteIds[0];
+      }
+    }
+
+    if (targetRouteId !== undefined && targetRouteId !== activeRouteId) {
+      prevActiveRouteIdRef.current = targetRouteId;
+      setActiveRouteId(targetRouteId);
+    }
+
     const validIds = route.pointsOrder.filter(id => points.some(p => p.id === id));
     const loadedActivePoints = validIds.map(id => points.find(p => p.id === id)).filter((p): p is Point => !!p);
     isSkipViaPointResetRef.current = true;
