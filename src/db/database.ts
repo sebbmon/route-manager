@@ -94,7 +94,7 @@ export function findNearestSegmentIndex(
 export function getSegmentProjectionT(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const l2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
   if (l2 === 0) return 0;
-  let t = ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / l2;
+  const t = ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / l2;
   return Math.max(0, Math.min(1, t));
 }
 
@@ -131,6 +131,7 @@ export interface Employee {
 
 export interface RouteHistory {
   id?: number;
+  routeId?: number;
   routeName: string;
   employeeName?: string;
   date: string;

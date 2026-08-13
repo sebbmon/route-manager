@@ -587,8 +587,17 @@ export default function MapComponent({
   const defaultZoom = 7;
 
   const validPoints = useMemo(() => {
-    return (points || []).filter(p => p && typeof p.lat === 'number' && !isNaN(p.lat) && typeof p.lng === 'number' && !isNaN(p.lng));
-  }, [points]);
+    const pointMap = new Map<number, Point>();
+    (points || []).forEach(p => {
+      if (p && p.id !== undefined) pointMap.set(p.id, p);
+    });
+    (activePoints || []).forEach(p => {
+      if (p && p.id !== undefined) pointMap.set(p.id, p);
+    });
+    return Array.from(pointMap.values()).filter(
+      p => p && typeof p.lat === 'number' && !isNaN(p.lat) && typeof p.lng === 'number' && !isNaN(p.lng)
+    );
+  }, [points, activePoints]);
 
   const validActivePoints = useMemo(() => {
     return (activePoints || []).filter(p => p && typeof p.lat === 'number' && !isNaN(p.lat) && typeof p.lng === 'number' && !isNaN(p.lng));
