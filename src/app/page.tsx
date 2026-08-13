@@ -80,7 +80,35 @@ const MapComponent = dynamic(() => import('@/components/MapComponent'), {
   )
 });
 
-// Helper to format Nominatim address object as "ulica, numer, miejscowość, kod pocztowy"
+// Helper to format Photon address properties into "ulica numer, miejscowość, kod pocztowy"
+const formatPhotonAddress = (properties: any): string => {
+  if (!properties) return '';
+  const street = properties.street;
+  const houseNumber = properties.housenumber;
+  const town = properties.city || properties.city_district || properties.town || properties.village || properties.municipality || properties.hamlet;
+  const postcode = properties.postcode;
+
+  const parts: string[] = [];
+  if (street) {
+    if (houseNumber) {
+      parts.push(`${street} ${houseNumber}`);
+    } else {
+      parts.push(street);
+    }
+  } else if (houseNumber) {
+    parts.push(houseNumber);
+  }
+  if (town) parts.push(town);
+  if (postcode) parts.push(postcode);
+
+  if (parts.length > 0) {
+    return parts.join(', ');
+  }
+
+  return properties.name || '';
+};
+
+// Helper to format Nominatim address object as "ulica numer, miejscowość, kod pocztowy"
 const formatOsmAddress = (addressObj: any, defaultDisplay: string): string => {
   if (!addressObj) return defaultDisplay;
 
@@ -90,8 +118,15 @@ const formatOsmAddress = (addressObj: any, defaultDisplay: string): string => {
   const postcode = addressObj.postcode;
 
   const parts: string[] = [];
-  if (street) parts.push(street);
-  if (houseNumber) parts.push(houseNumber);
+  if (street) {
+    if (houseNumber) {
+      parts.push(`${street} ${houseNumber}`);
+    } else {
+      parts.push(street);
+    }
+  } else if (houseNumber) {
+    parts.push(houseNumber);
+  }
   if (town) parts.push(town);
   if (postcode) parts.push(postcode);
 
@@ -102,25 +137,54 @@ const formatOsmAddress = (addressObj: any, defaultDisplay: string): string => {
   return defaultDisplay;
 };
 
-// Helper to format Photon address properties into "ulica, numer, miejscowość, kod pocztowy"
-const formatPhotonAddress = (properties: any): string => {
-  if (!properties) return '';
-  const street = properties.street;
-  const houseNumber = properties.housenumber;
-  const town = properties.city || properties.city_district || properties.town || properties.village || properties.municipality || properties.hamlet;
-  const postcode = properties.postcode;
-
-  const parts: string[] = [];
-  if (street) parts.push(street);
-  if (houseNumber) parts.push(houseNumber);
-  if (town) parts.push(town);
-  if (postcode) parts.push(postcode);
-
-  if (parts.length > 0) {
-    return parts.join(', ');
+// Resilient reverse geocoding helper (Primary: Photon, Fallback: Nominatim)
+const reverseGeocode = async (lat: number, lng: number): Promise<{ address: string; name: string } | null> => {
+  // 1. Try Photon first (without invalid lang param)
+  try {
+    const res = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lng}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.features && data.features.length > 0) {
+        const feat = data.features[0];
+        const p = feat.properties || {};
+        const formatted = formatPhotonAddress(p);
+        const streetPart = p.street ? (p.housenumber ? `${p.street} ${p.housenumber}` : p.street) : '';
+        const shortName = streetPart || p.name || (p.city || p.town ? (p.city || p.town) : formatted) || 'Punkt na mapie';
+        return {
+          address: formatted || shortName,
+          name: shortName
+        };
+      }
+    }
+  } catch (err) {
+    // Failover to Nominatim
   }
 
-  return properties.name || '';
+  // 2. Fallback to Nominatim if Photon is unreachable or 503
+  try {
+    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`, {
+      headers: { 'Accept-Language': 'pl,en-US;q=0.7,en;q=0.3' }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data) {
+        const formatted = formatOsmAddress(data.address, data.display_name || '');
+        const street = data.address?.road || data.address?.pedestrian || data.address?.street;
+        const houseNr = data.address?.house_number || data.address?.building;
+        const streetWithNr = street ? (houseNr ? `${street} ${houseNr}` : street) : '';
+        const nameParts = (data.display_name || '').split(',');
+        const shortName = streetWithNr || (nameParts.length > 0 ? nameParts[0].trim() : 'Punkt na mapie');
+        return {
+          address: formatted || shortName,
+          name: shortName
+        };
+      }
+    }
+  } catch (err) {
+    console.error('Reverse geocoding error:', err);
+  }
+
+  return null;
 };
 
 // Helper to construct a clear suggestion text for autocomplete items
@@ -392,18 +456,12 @@ export default function Dashboard() {
       for (const point of legacyPoints) {
         if (point.id === undefined) continue;
         try {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${point.lat}&lon=${point.lng}&format=json`, {
-            headers: { 'Accept-Language': 'pl,en-US;q=0.7,en;q=0.3' }
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data) {
-              const formatted = formatOsmAddress(data.address, data.display_name || '');
-              await db.points.update(point.id, {
-                address: formatted
-              });
-            }
+          await new Promise(resolve => setTimeout(resolve, 200));
+          const result = await reverseGeocode(point.lat, point.lng);
+          if (result && result.address) {
+            await db.points.update(point.id, {
+              address: result.address
+            });
           } else {
             await db.points.update(point.id, {
               address: `Szer: ${point.lat.toFixed(4)}, Dł: ${point.lng.toFixed(4)}`
@@ -428,8 +486,7 @@ export default function Dashboard() {
   const [formData, setFormData] = useState({ id: undefined as number | undefined, name: '', lat: '', lng: '', address: '' });
   const [routeName, setRouteName] = useState('');
   const [isUpdatingMatrix, setIsUpdatingMatrix] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<Array<{ id: number; message: string; type: 'success' | 'error' | 'warning' | 'info'; duration: number }>>([]);
   const [routeCoordinates, setRouteCoordinates] = useState<[number, number][]>([]);
   const [totalDistance, setTotalDistance] = useState(0);
   const [stepDistances, setStepDistances] = useState<Record<string, number>>({});
@@ -449,6 +506,7 @@ export default function Dashboard() {
   const prevActivePointIdsRef = useRef<number[]>(activePointIds);
 
   const prevActiveRouteIdRef = useRef<number | null>(activeRouteId);
+  const mapClickGeocodeSeqRef = useRef<number>(0);
 
   // Automatically reset planning state when user switches the active route folder
   useEffect(() => {
@@ -769,19 +827,10 @@ export default function Dashboard() {
     setIsUpdatingMatrix(true);
     try {
       let finalAddress = editFormData.address;
-      if (!finalAddress || finalAddress.startsWith('Pobieranie adresu...') || finalAddress.startsWith('Współrzędne:')) {
-        try {
-          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${latVal}&lon=${lngVal}&format=json`, {
-            headers: { 'Accept-Language': 'pl,en-US;q=0.7,en;q=0.3' }
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data) {
-              finalAddress = formatOsmAddress(data.address, data.display_name || '');
-            }
-          }
-        } catch (err) {
-          console.error('Edit submit reverse-lookup error:', err);
+      if (!finalAddress || finalAddress.startsWith('Współrzędne:') || finalAddress.startsWith('Szer:')) {
+        const result = await reverseGeocode(latVal, lngVal);
+        if (result && result.address) {
+          finalAddress = result.address;
         }
       }
 
@@ -821,7 +870,6 @@ export default function Dashboard() {
     if (!addressQuery.trim()) return;
 
     setIsGeocoding(true);
-    setError(null);
     setGeocodingResults([]);
 
     try {
@@ -1240,63 +1288,66 @@ export default function Dashboard() {
     );
   }, [activeRoutePoints, searchQuery]);
 
-  // Handle map click to fill form coordinates
+  // Status message helpers (animated toasts with progress countdown bar)
+  const showStatusMessage = (
+    msg: string,
+    type: 'success' | 'error' | 'warning' | 'info' = 'info',
+    duration?: number
+  ) => {
+    const defaultDuration = type === 'error' ? 5000 : type === 'warning' ? 4500 : 3000;
+    const toastDuration = duration ?? defaultDuration;
+    const newId = Date.now() + Math.random();
+
+    setToasts(prev => {
+      const filtered = (type === 'success' || type === 'error')
+        ? prev.filter(t => t.type !== 'warning' || !t.message.includes('Pobieranie'))
+        : prev;
+      return [...filtered, { id: newId, message: msg, type, duration: toastDuration }];
+    });
+
+    if (toastDuration > 0) {
+      setTimeout(() => {
+        setToasts(prev => prev.filter(t => t.id !== newId));
+      }, toastDuration);
+    }
+  };
+
+  const dismissToast = (id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
+
+  // Handle map click to fill form coordinates seamlessly without placeholder flickering
   const handleMapClick = async (lat: number, lng: number) => {
     setActiveTab('points');
+    const currentSeq = ++mapClickGeocodeSeqRef.current;
+
+    // Immediately update coordinates without wiping the current name to prevent flickering
     setFormData(prev => ({
       ...prev,
       lat: lat.toFixed(6),
-      lng: lng.toFixed(6),
-      address: 'Pobieranie adresu...'
+      lng: lng.toFixed(6)
     }));
 
-    try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`, {
-        headers: { 'Accept-Language': 'pl,en-US;q=0.7,en;q=0.3' }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data) {
-          const nameParts = (data.display_name || '').split(',');
-          const shortName = nameParts.length > 0 ? nameParts[0].trim() : `Punkt na mapie`;
-          let finalName = shortName;
-          if (nameParts.length > 1 && shortName.length < 5) {
-            finalName = `${shortName}, ${nameParts[1].trim()}`;
-          }
+    const result = await reverseGeocode(lat, lng);
+    // Ignore outdated responses if user clicked another location in the meantime
+    if (mapClickGeocodeSeqRef.current !== currentSeq) return;
 
-          const formattedAddress = formatOsmAddress(data.address, data.display_name || '');
-
-          setFormData(prev => ({
-            ...prev,
-            name: finalName,
-            address: formattedAddress
-          }));
-          showStatusMessage('Ustalono adres na podstawie kliknięcia!', 'success');
-          return;
-        }
-      }
-    } catch (err) {
-      console.error('Reverse geocoding failed:', err);
+    if (result) {
+      setFormData(prev => ({
+        ...prev,
+        name: result.name || result.address,
+        address: result.address
+      }));
+      showStatusMessage('Ustalono adres na podstawie kliknięcia!', 'success', 3000);
+      return;
     }
 
     setFormData(prev => ({
       ...prev,
+      name: prev.name ? prev.name : `Punkt (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
       address: `Współrzędne: ${lat.toFixed(6)}, ${lng.toFixed(6)}`
     }));
-    showStatusMessage('Uzupełniono współrzędne z mapy!', 'success');
-  };
-
-  // Status message helpers
-  const showStatusMessage = (msg: string, type: 'success' | 'error') => {
-    if (type === 'success') {
-      setSuccess(msg);
-      setError(null);
-      setTimeout(() => setSuccess(null), 3000);
-    } else {
-      setError(msg);
-      setSuccess(null);
-      setTimeout(() => setError(null), 5000);
-    }
+    showStatusMessage('Uzupełniono współrzędne z mapy!', 'info', 3000);
   };
 
   // Save Point handler
@@ -1318,19 +1369,10 @@ export default function Dashboard() {
     setIsUpdatingMatrix(true);
     try {
       let finalAddress = formData.address;
-      if (!finalAddress || finalAddress.startsWith('Pobieranie adresu...') || finalAddress.startsWith('Współrzędne:')) {
-        try {
-          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${latVal}&lon=${lngVal}&format=json`, {
-            headers: { 'Accept-Language': 'pl,en-US;q=0.7,en;q=0.3' }
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data) {
-              finalAddress = formatOsmAddress(data.address, data.display_name || '');
-            }
-          }
-        } catch (err) {
-          console.error('Submit reverse-lookup error:', err);
+      if (!finalAddress || finalAddress.startsWith('Współrzędne:') || finalAddress.startsWith('Szer:')) {
+        const result = await reverseGeocode(latVal, lngVal);
+        if (result && result.address) {
+          finalAddress = result.address;
         }
       }
 
@@ -1820,7 +1862,6 @@ export default function Dashboard() {
   // Force rebuild of distances table manually
   const handleForceRebuild = async () => {
     setIsUpdatingMatrix(true);
-    setError(null);
     try {
       await updateDistanceMatrix();
       showStatusMessage('Pomyślnie przebudowano macierz odległości!', 'success');
@@ -1889,33 +1930,72 @@ export default function Dashboard() {
       </header>
 
       {/* Floating Toast Notification Container (Bottom-Right Pop-Over) */}
-      <div className="fixed bottom-10 right-4 z-[9999] flex flex-col gap-2.5 pointer-events-none">
-        {error && (
-          <div className="pointer-events-auto flex items-center gap-3 px-4.5 py-3.5 bg-white dark:bg-zinc-900 border border-rose-200 dark:border-rose-900/60 shadow-2xl rounded-2xl text-sm font-bold text-rose-600 dark:text-rose-400 animate-slide-in max-w-md">
-            <Info className="w-5 h-5 flex-shrink-0 text-rose-500" />
-            <span className="pr-2 leading-snug">{error}</span>
-            <button
-              type="button"
-              onClick={() => setError(null)}
-              className="ml-auto text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer p-1"
+      <div className="fixed bottom-10 right-4 z-[9999] flex flex-col gap-2.5 pointer-events-none max-w-md w-full sm:w-auto">
+        {toasts.map(toast => {
+          const isSuccess = toast.type === 'success';
+          const isError = toast.type === 'error';
+          const isWarning = toast.type === 'warning';
+          const isInfo = toast.type === 'info';
+
+          const borderClass = isSuccess
+            ? 'border-emerald-200 dark:border-emerald-900/60'
+            : isError
+            ? 'border-rose-200 dark:border-rose-900/60'
+            : isWarning
+            ? 'border-amber-300 dark:border-amber-700/60'
+            : 'border-indigo-200 dark:border-indigo-900/60';
+
+          const textClass = isSuccess
+            ? 'text-emerald-700 dark:text-emerald-300'
+            : isError
+            ? 'text-rose-700 dark:text-rose-300'
+            : isWarning
+            ? 'text-amber-800 dark:text-amber-200'
+            : 'text-indigo-700 dark:text-indigo-300';
+
+          const progressBarColor = isSuccess
+            ? 'bg-emerald-500'
+            : isError
+            ? 'bg-rose-500'
+            : isWarning
+            ? 'bg-amber-500'
+            : 'bg-indigo-500';
+
+          return (
+            <div
+              key={toast.id}
+              className={`pointer-events-auto relative overflow-hidden flex items-center gap-3 px-4.5 py-3.5 bg-white dark:bg-zinc-900 border shadow-2xl rounded-2xl text-sm font-bold animate-slide-in max-w-md ${borderClass} ${textClass}`}
             >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        )}
-        {success && (
-          <div className="pointer-events-auto flex items-center gap-3 px-4.5 py-3.5 bg-white dark:bg-zinc-900 border border-emerald-200 dark:border-emerald-900/60 shadow-2xl rounded-2xl text-sm font-bold text-emerald-600 dark:text-emerald-400 animate-slide-in max-w-md">
-            <CheckCircle2 className="w-5 h-5 flex-shrink-0 text-emerald-500" />
-            <span className="pr-2 leading-snug">{success}</span>
-            <button
-              type="button"
-              onClick={() => setSuccess(null)}
-              className="ml-auto text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer p-1"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        )}
+              {isSuccess && <CheckCircle2 className="w-5 h-5 flex-shrink-0 text-emerald-500" />}
+              {isError && <Info className="w-5 h-5 flex-shrink-0 text-rose-500" />}
+              {isWarning && <Loader2 className="w-5 h-5 flex-shrink-0 text-amber-500 animate-spin" />}
+              {isInfo && <Info className="w-5 h-5 flex-shrink-0 text-indigo-500" />}
+
+              <span className="pr-3 leading-snug flex-1 select-none">{toast.message}</span>
+
+              <button
+                type="button"
+                onClick={() => dismissToast(toast.id)}
+                className="ml-auto text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer p-1 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+
+              {/* Countdown Progress Bar */}
+              {toast.duration > 0 && (
+                <div className="absolute bottom-0 left-0 right-0 h-1 bg-zinc-200/50 dark:bg-zinc-800/60 overflow-hidden">
+                  <div
+                    className={`h-full w-full ${progressBarColor}`}
+                    style={{
+                      transformOrigin: 'left',
+                      animation: `toastCountdown ${toast.duration}ms linear forwards`,
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* 2. MAIN DESKTOP WORKBENCH (Sidebar + Map Viewport) */}
