@@ -12,6 +12,7 @@ import {
   ViaPoint,
   findNearestSegmentIndex,
   normalizeViaPoints,
+  reconcileViaPoints,
   sortViaPointsForSegment,
   exportDatabaseToJSON,
   importDatabaseFromJSON,
@@ -376,6 +377,8 @@ export default function Dashboard() {
   const isSkipViaPointResetRef = useRef(false);
   const prevActiveRouteIdRef = useRef<number | null>(activeRouteId);
   const mapClickGeocodeSeqRef = useRef<number>(0);
+  const lastSavedDragTimestampRef = useRef<number>(0);
+  const isSavedPointDraggingRef = useRef<boolean>(false);
 
   // Automatically reset planning state when user switches the active route folder manually
   useEffect(() => {
@@ -413,6 +416,34 @@ export default function Dashboard() {
       .map(id => points.find(p => p.id === id))
       .filter((p): p is Point => !!p);
   }, [activePointIds, points]);
+
+  // Synchronize viaPoints whenever active points change:
+  // - Keeps via points attached to their corresponding segments
+  // - If a segment was broken/removed, the via point is permanently removed
+  useEffect(() => {
+    if (isSkipViaPointResetRef.current) {
+      isSkipViaPointResetRef.current = false;
+      return;
+    }
+    setViaPoints(prevVias => {
+      if (prevVias.length === 0) return prevVias;
+      const reconciled = reconcileViaPoints(prevVias, activePoints);
+      if (
+        reconciled.length === prevVias.length &&
+        reconciled.every(
+          (v, i) =>
+            v.segmentIndex === prevVias[i].segmentIndex &&
+            v.lat === prevVias[i].lat &&
+            v.lng === prevVias[i].lng &&
+            v.fromPointId === prevVias[i].fromPointId &&
+            v.toPointId === prevVias[i].toPointId
+        )
+      ) {
+        return prevVias;
+      }
+      return reconciled;
+    });
+  }, [activePoints]);
 
   // Navigation segments calculation (max 10 points per segment)
   const gmapsSegments = useMemo(() => {
@@ -1012,66 +1043,94 @@ export default function Dashboard() {
     await db.points.update(nextPoint.id, { order: currentOrder });
   };
 
-  // Drag and Drop live swapping for saved points
-  const handlePointerDownSavedDrag = (e: React.PointerEvent, pointId: number) => {
-    setActiveSavedDragId(pointId);
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  // Drag and Drop live swapping for saved points in database
+  const handlePointerDownSavedDrag = (e: React.PointerEvent, id: number) => {
+    if (e.button !== 0) return;
+    isSavedPointDraggingRef.current = true;
+    lastSavedDragTimestampRef.current = Date.now();
+    setActiveSavedDragId(id);
   };
 
-  const handlePointerEnterSavedHover = async (targetPointId: number) => {
-    if (activeSavedDragId === null || activeSavedDragId === targetPointId) return;
+  const handlePointerEnterSavedHover = async (hoverId: number) => {
+    if (activeSavedDragId === null || activeSavedDragId === hoverId) return;
+    lastSavedDragTimestampRef.current = Date.now();
 
-    const sourcePoint = points.find(p => p.id === activeSavedDragId);
-    const targetPoint = points.find(p => p.id === targetPointId);
-    if (!sourcePoint || !targetPoint || !sourcePoint.id || !targetPoint.id) return;
+    const fromPoint = points.find(p => p.id === activeSavedDragId);
+    const toPoint = points.find(p => p.id === hoverId);
+    if (!fromPoint?.id || !toPoint?.id) return;
 
-    const sourceOrder = sourcePoint.order ?? 0;
-    const targetOrder = targetPoint.order ?? 0;
+    const fromIdxInFull = points.findIndex(p => p.id === fromPoint.id);
+    const toIdxInFull = points.findIndex(p => p.id === toPoint.id);
+    if (fromIdxInFull === -1 || toIdxInFull === -1 || fromIdxInFull === toIdxInFull) return;
 
-    await db.points.update(sourcePoint.id, { order: targetOrder });
-    await db.points.update(targetPoint.id, { order: sourceOrder });
+    const updatedPoints = [...points];
+    const [moved] = updatedPoints.splice(fromIdxInFull, 1);
+    updatedPoints.splice(toIdxInFull, 0, moved);
+
+    await db.transaction('rw', db.points, async () => {
+      for (let i = 0; i < updatedPoints.length; i++) {
+        const p = updatedPoints[i];
+        if (p.id !== undefined && p.order !== i) {
+          await db.points.update(p.id, { order: i });
+        }
+      }
+    });
   };
 
-  // Drag and Drop live swapping for active route points
+  // Live-swapping Pointer Drag and Drop for active route plan
   const handlePointerDownDrag = (e: React.PointerEvent, index: number) => {
+    if (e.button !== 0) return;
+    if (isHasReturnLeg && (index === 0 || index === activePointIds.length - 1)) return;
     setActiveDragIndex(index);
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
   };
 
-  const handlePointerEnterHover = (targetIndex: number) => {
-    if (activeDragIndex === null || activeDragIndex === targetIndex) return;
+  const handlePointerEnterHover = (hoverIndex: number) => {
+    if (activeDragIndex === null || activeDragIndex === hoverIndex) return;
+    if (isHasReturnLeg && (hoverIndex === 0 || hoverIndex === activePointIds.length - 1)) return;
+    if (isHasReturnLeg && (activeDragIndex === 0 || activeDragIndex === activePointIds.length - 1)) return;
 
     setActivePointIds(prev => {
       const updated = [...prev];
       const [draggedItem] = updated.splice(activeDragIndex, 1);
-      updated.splice(targetIndex, 0, draggedItem);
+      updated.splice(hoverIndex, 0, draggedItem);
       return updated;
     });
 
-    setActiveDragIndex(targetIndex);
+    setActiveDragIndex(hoverIndex);
   };
 
   useEffect(() => {
     const handleGlobalPointerUp = () => {
-      if (activeDragIndex !== null) setActiveDragIndex(null);
-      if (activeSavedDragId !== null) setActiveSavedDragId(null);
+      if (isSavedPointDraggingRef.current) {
+        isSavedPointDraggingRef.current = false;
+        lastSavedDragTimestampRef.current = Date.now();
+      }
+      setActiveDragIndex(null);
+      setActiveSavedDragId(null);
     };
 
     window.addEventListener('pointerup', handleGlobalPointerUp);
     return () => window.removeEventListener('pointerup', handleGlobalPointerUp);
-  }, [activeDragIndex, activeSavedDragId]);
+  }, []);
 
   // Via-point correction handlers
   const handleAddViaPoint = (lat: number, lng: number, segmentIndex?: number) => {
     const segIdx = segmentIndex ?? 0;
-    setViaPoints(prev => [...prev, { segmentIndex: segIdx, lat, lng }]);
+    const fromPointId = activePoints[segIdx]?.id;
+    const toPointId = activePoints[segIdx + 1]?.id;
+    setViaPoints(prev => [...prev, { segmentIndex: segIdx, lat, lng, fromPointId, toPointId }]);
+    showStatusMessage('Dodano korektę trasowania na mapie!', 'success');
   };
 
   const handleUpdateViaPoint = (index: number, lat: number, lng: number, segmentIndex?: number) => {
     setViaPoints(prev =>
-      prev.map((v, idx) =>
-        idx === index ? { ...v, lat, lng, segmentIndex: segmentIndex ?? v.segmentIndex } : v
-      )
+      prev.map((v, idx) => {
+        if (idx !== index) return v;
+        const finalSegIdx = segmentIndex ?? v.segmentIndex;
+        const fromPointId = v.fromPointId ?? activePoints[finalSegIdx]?.id;
+        const toPointId = v.toPointId ?? activePoints[finalSegIdx + 1]?.id;
+        return { ...v, lat, lng, segmentIndex: finalSegIdx, fromPointId, toPointId };
+      })
     );
   };
 
@@ -1089,6 +1148,7 @@ export default function Dashboard() {
 
   // Active route points manipulation
   const handleToggleActive = (id: number) => {
+    if (Date.now() - lastSavedDragTimestampRef.current < 250) return;
     setActivePointIds(prev => {
       if (prev.includes(id)) {
         return prev.filter(pId => pId !== id);

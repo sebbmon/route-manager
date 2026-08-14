@@ -29,6 +29,8 @@ export interface ViaPoint {
   segmentIndex: number;
   lat: number;
   lng: number;
+  fromPointId?: number;
+  toPointId?: number;
 }
 
 function distanceToSegmentSquared(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
@@ -119,10 +121,63 @@ export function normalizeViaPoints(
       const lat = v[0];
       const lng = v[1];
       const segmentIndex = activePoints.length >= 2 ? findNearestSegmentIndex(lat, lng, activePoints) : 0;
-      return { segmentIndex, lat, lng };
+      const fromPointId = activePoints[segmentIndex]?.id;
+      const toPointId = activePoints[segmentIndex + 1]?.id;
+      return { segmentIndex, lat, lng, fromPointId, toPointId };
+    }
+    if (v.fromPointId === undefined || v.toPointId === undefined) {
+      const fromPointId = activePoints[v.segmentIndex]?.id;
+      const toPointId = activePoints[v.segmentIndex + 1]?.id;
+      return { ...v, fromPointId, toPointId };
     }
     return v;
   });
+}
+
+/**
+ * Reconciles viaPoints with the current list of active points.
+ * - If a segment (fromPointId -> toPointId) still exists consecutively in activePoints,
+ *   its segmentIndex is updated to the new segment's index.
+ * - If a segment was broken/removed because a point was removed or reordered,
+ *   the associated viaPoint is permanently discarded.
+ */
+export function reconcileViaPoints(
+  currentViaPoints: ViaPoint[],
+  activePoints: Point[]
+): ViaPoint[] {
+  if (!currentViaPoints || currentViaPoints.length === 0 || !activePoints || activePoints.length < 2) {
+    return [];
+  }
+
+  const result: ViaPoint[] = [];
+
+  for (const via of currentViaPoints) {
+    if (via.fromPointId !== undefined && via.toPointId !== undefined) {
+      let matchedIdx = -1;
+      for (let i = 0; i < activePoints.length - 1; i++) {
+        if (activePoints[i].id === via.fromPointId && activePoints[i + 1].id === via.toPointId) {
+          matchedIdx = i;
+          break;
+        }
+      }
+      if (matchedIdx !== -1) {
+        result.push({
+          ...via,
+          segmentIndex: matchedIdx
+        });
+      }
+    } else {
+      if (typeof via.segmentIndex === 'number' && via.segmentIndex < activePoints.length - 1) {
+        result.push({
+          ...via,
+          fromPointId: activePoints[via.segmentIndex]?.id,
+          toPointId: activePoints[via.segmentIndex + 1]?.id
+        });
+      }
+    }
+  }
+
+  return result;
 }
 
 export interface Employee {
