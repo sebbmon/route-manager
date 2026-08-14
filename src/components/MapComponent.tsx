@@ -748,6 +748,7 @@ export default function MapComponent({
         key="route-planner-map"
         center={defaultCenter}
         zoom={defaultZoom}
+        preferCanvas={true}
         style={{ height: '100%', width: '100%', zIndex: 0 }}
       >
         <TileLayer
