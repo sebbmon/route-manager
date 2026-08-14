@@ -562,7 +562,7 @@ export default function Dashboard() {
       });
       showStatusMessage('Dodano nowy punkt do bazy!', 'success');
 
-      await updateDistanceMatrix();
+      await updateDistanceMatrix(targetRouteId);
       setFormData({ id: undefined, name: '', lat: '', lng: '', address: '' });
     } catch (err) {
       console.error(err);
@@ -864,6 +864,7 @@ export default function Dashboard() {
       }
 
       const savedAddress = finalAddress || `Szer: ${latVal.toFixed(4)}, Dł: ${lngVal.toFixed(4)}`;
+      const previousRouteId = editingPoint.routeId;
       const targetRouteId = editFormData.routeId ?? editingPoint.routeId;
 
       await db.points.update(editingPoint.id, {
@@ -879,11 +880,15 @@ export default function Dashboard() {
         const targetRoute = savedUserRoutes.find(r => r.id === targetRouteId);
         const routeMsg = targetRoute ? ` do trasy "${targetRoute.name}"` : '';
         showStatusMessage(`Zaktualizowano i przeniesiono punkt${routeMsg}!`, 'success');
+        if (previousRouteId !== undefined) {
+          await updateDistanceMatrix(previousRouteId);
+        }
+        await updateDistanceMatrix(targetRouteId);
       } else {
         showStatusMessage('Zaktualizowano punkt w bazie!', 'success');
+        await updateDistanceMatrix(targetRouteId);
       }
 
-      await updateDistanceMatrix();
       setEditingPoint(null);
     } catch (err) {
       console.error(err);
@@ -896,14 +901,15 @@ export default function Dashboard() {
   const handleConfirmDeletePoint = async () => {
     if (!deletingPoint || deletingPoint.id === undefined) return;
     const pointId = deletingPoint.id;
+    const pointRouteId = deletingPoint.routeId;
     setIsUpdatingMatrix(true);
     try {
       await db.points.delete(pointId);
-      await db.distances.where('fromPointId').equals(pointId).or('toPointId').equals(pointId).delete();
+      await db.distances.where('fromId').equals(pointId).or('toId').equals(pointId).delete();
       setActivePointIds(prev => prev.filter(id => id !== pointId));
       showStatusMessage('Punkt został usunięty z bazy.', 'success');
       setDeletingPoint(null);
-      await updateDistanceMatrix();
+      await updateDistanceMatrix(pointRouteId);
     } catch (err) {
       console.error(err);
       showStatusMessage('Wystąpił błąd podczas usuwania punktu.', 'error');
@@ -954,9 +960,9 @@ export default function Dashboard() {
       for (const p of pointsToDelete) {
         if (p.id !== undefined) {
           await db.points.delete(p.id);
-          await db.distances.where('fromPointId').equals(p.id).or('toPointId').equals(p.id).delete();
         }
       }
+      await db.distances.where('routeId').equals(targetRouteId).delete();
       await db.routes.delete(targetRouteId);
 
       const remainingRoutes = savedUserRoutes.filter(r => r.id !== targetRouteId);
@@ -973,7 +979,6 @@ export default function Dashboard() {
 
       setDeletingFolderRoute(null);
       showStatusMessage('Trasa została pomyślnie usunięta.', 'success');
-      await updateDistanceMatrix();
     } catch (err) {
       console.error(err);
       showStatusMessage('Wystąpił błąd podczas usuwania trasy.', 'error');
@@ -1368,7 +1373,11 @@ export default function Dashboard() {
   const handleForceRebuild = async () => {
     setIsUpdatingMatrix(true);
     try {
-      await updateDistanceMatrix();
+      if (activeRouteId !== null) {
+        await updateDistanceMatrix(activeRouteId);
+      } else {
+        await updateDistanceMatrix();
+      }
       showStatusMessage('Pomyślnie przebudowano macierz odległości!', 'success');
     } catch (err) {
       console.error(err);
@@ -1454,7 +1463,6 @@ export default function Dashboard() {
         mode === 'overwrite' ? 'Pomyślnie zastąpiono całą bazę danymi z pliku!' : 'Pomyślnie scalono dane z pliku z obecną bazą!',
         'success'
       );
-      await updateDistanceMatrix();
     } catch (err: any) {
       console.error(err);
       showStatusMessage(err.message || 'Wystąpił błąd podczas importu danych.', 'error');

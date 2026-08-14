@@ -18,7 +18,8 @@ export interface SavedRoute {
 }
 
 export interface Distance {
-  id: string; // "fromId-toId"
+  id: string; // "routeId_fromId-toId" or "fromId-toId"
+  routeId?: number;
   fromId: number;
   toId: number;
   distanceKm: number;
@@ -170,74 +171,126 @@ export class RoutePlannerDatabase extends Dexie {
       routes: '++id, name, order',
       employees: '++id, name'
     });
+
+    this.version(4).stores({
+      points: '++id, routeId, name, lat, lng',
+      distances: 'id, routeId, fromId, toId, distanceKm',
+      routes_history: '++id, routeName, employeeName, date, totalDistance',
+      routes: '++id, name, order',
+      employees: '++id, name'
+    }).upgrade(async tx => {
+      // Migration: Clean up obsolete cross-route distances so they can be freshly built per route
+      await tx.table('distances').clear();
+    });
   }
 }
 
 export const db = new RoutePlannerDatabase();
 
 /**
- * Re-fetches the entire distance matrix from OSRM and updates the distances table.
- * It queries all points from the 'points' table and gets the "each-to-each" distance.
+ * Re-fetches the distance matrix from OSRM for a specific route/folder (targetRouteId)
+ * or across all routes individually if targetRouteId is omitted.
  */
-export async function updateDistanceMatrix(): Promise<void> {
-  const points = await db.points.toArray();
-  
-  if (points.length < 2) {
-    // Cannot compute distances for less than 2 points, clear the table
-    await db.distances.clear();
-    return;
-  }
-
-  // Build the coordinate string: lng,lat;lng,lat...
-  const coords = points.map(p => `${p.lng},${p.lat}`).join(';');
-  const url = `http://router.project-osrm.org/table/v1/driving/${coords}?annotations=distance`;
-
-  try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      throw new Error(`OSRM Distance Matrix API failed: ${res.statusText}`);
+export async function updateDistanceMatrix(targetRouteId?: number): Promise<void> {
+  const updateSingleRouteMatrix = async (routeId: number | undefined) => {
+    let points: Point[];
+    if (routeId !== undefined) {
+      points = await db.points.where('routeId').equals(routeId).toArray();
+    } else {
+      points = await db.points.filter(p => p.routeId === undefined || p.routeId === null).toArray();
     }
 
-    const data = await res.json();
-    if (data.code !== 'Ok' || !data.distances) {
-      throw new Error(`OSRM Distance Matrix API error: ${data.code}`);
+    if (points.length < 2) {
+      // Cannot compute distances for less than 2 points in this route, clear distances for this route
+      if (routeId !== undefined) {
+        await db.distances.where('routeId').equals(routeId).delete();
+      } else {
+        await db.distances.filter(d => d.routeId === undefined || d.routeId === null).delete();
+      }
+      return;
     }
 
-    const newDistances: Distance[] = [];
+    // Build the coordinate string: lng,lat;lng,lat...
+    const coords = points.map(p => `${p.lng},${p.lat}`).join(';');
+    const url = `https://router.project-osrm.org/table/v1/driving/${coords}?annotations=distance`;
 
-    // OSRM returns distances[fromIndex][toIndex] in meters
-    for (let i = 0; i < points.length; i++) {
-      for (let j = 0; j < points.length; j++) {
-        const fromPoint = points[i];
-        const toPoint = points[j];
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`OSRM Distance Matrix API failed: ${res.statusText}`);
+      }
 
-        if (fromPoint.id === undefined || toPoint.id === undefined) continue;
+      const data = await res.json();
+      if (data.code !== 'Ok' || !data.distances) {
+        throw new Error(`OSRM Distance Matrix API error: ${data.code}`);
+      }
 
-        const distanceMeters = data.distances[i][j];
-        
-        // Convert to km, round to 1 decimal place.
-        // Math.round(meters / 100) / 10 is equivalent to Math.round((meters / 1000) * 10) / 10
-        const distanceKm = distanceMeters !== null && distanceMeters !== undefined
-          ? Math.round(distanceMeters / 100) / 10
-          : 0;
+      const newDistances: Distance[] = [];
 
-        newDistances.push({
-          id: `${fromPoint.id}-${toPoint.id}`,
-          fromId: fromPoint.id,
-          toId: toPoint.id,
-          distanceKm
-        });
+      // OSRM returns distances[fromIndex][toIndex] in meters
+      for (let i = 0; i < points.length; i++) {
+        for (let j = 0; j < points.length; j++) {
+          const fromPoint = points[i];
+          const toPoint = points[j];
+
+          if (fromPoint.id === undefined || toPoint.id === undefined) continue;
+
+          const distanceMeters = data.distances[i][j];
+          
+          // Convert to km, round to 1 decimal place.
+          const distanceKm = distanceMeters !== null && distanceMeters !== undefined
+            ? Math.round(distanceMeters / 100) / 10
+            : 0;
+
+          newDistances.push({
+            id: `${routeId ?? 'default'}_${fromPoint.id}-${toPoint.id}`,
+            routeId: routeId,
+            fromId: fromPoint.id,
+            toId: toPoint.id,
+            distanceKm
+          });
+        }
+      }
+
+      // Write to DB atomically for this specific route only
+      await db.transaction('rw', db.distances, async () => {
+        if (routeId !== undefined) {
+          await db.distances.where('routeId').equals(routeId).delete();
+        } else {
+          await db.distances.filter(d => d.routeId === undefined || d.routeId === null).delete();
+        }
+        if (newDistances.length > 0) {
+          await db.distances.bulkAdd(newDistances);
+        }
+      });
+    } catch (error) {
+      console.error(`Failed to update distance matrix for routeId ${routeId}:`, error);
+      throw error;
+    }
+  };
+
+  if (targetRouteId !== undefined) {
+    await updateSingleRouteMatrix(targetRouteId);
+  } else {
+    // If no targetRouteId is specified, update all distinct routes individually
+    const routes = await db.routes.toArray();
+    const routeIds: (number | undefined)[] = routes
+      .map(r => r.id)
+      .filter((id): id is number => id !== undefined);
+
+    // Also check if there are unassigned points (routeId undefined)
+    const unassignedCount = await db.points.filter(p => p.routeId === undefined || p.routeId === null).count();
+    if (unassignedCount > 0) {
+      routeIds.push(undefined);
+    }
+
+    for (const rid of routeIds) {
+      try {
+        await updateSingleRouteMatrix(rid);
+      } catch (err) {
+        console.warn(`Could not update distance matrix for route ${rid}:`, err);
       }
     }
-
-    // Write to DB atomically
-    await db.transaction('rw', db.distances, async () => {
-      await db.distances.clear();
-      await db.distances.bulkAdd(newDistances);
-    });
-  } catch (error) {
-    console.error('Failed to update distance matrix:', error);
-    throw error;
   }
 }
 
@@ -259,17 +312,18 @@ export async function exportDatabaseToJSON(): Promise<DatabaseBackupData> {
   const points = await db.points.toArray();
   const routes = await db.routes.toArray();
   const routes_history = await db.routes_history.toArray();
-  const distances = await db.distances.toArray();
   const employees = await db.employees.toArray();
 
+  // Note: We intentionally omit the redundant 'distances' table from the backup
+  // to keep the JSON file lightweight (kilobytes instead of megabytes).
+  // Distances are automatically and quickly recalculated per route when needed.
   return {
-    version: 3,
+    version: 4,
     appName: 'RoutePlanner',
     exportedAt: new Date().toISOString(),
     points,
     routes,
     routes_history,
-    distances,
     employees,
   };
 }
@@ -288,7 +342,6 @@ export async function importDatabaseFromJSON(
   const points = Array.isArray(backupData.points) ? backupData.points : [];
   const routes = Array.isArray(backupData.routes) ? backupData.routes : [];
   const routes_history = Array.isArray(backupData.routes_history) ? backupData.routes_history : [];
-  const distances = Array.isArray(backupData.distances) ? backupData.distances : [];
   const employees = Array.isArray(backupData.employees) ? backupData.employees : [];
 
   if (mode === 'overwrite') {
@@ -302,7 +355,6 @@ export async function importDatabaseFromJSON(
       if (points.length > 0) await db.points.bulkAdd(points);
       if (routes.length > 0) await db.routes.bulkAdd(routes);
       if (routes_history.length > 0) await db.routes_history.bulkAdd(routes_history);
-      if (distances.length > 0) await db.distances.bulkAdd(distances);
       if (employees.length > 0) await db.employees.bulkAdd(employees);
     });
   } else {
@@ -328,7 +380,7 @@ export async function importDatabaseFromJSON(
     });
   }
 
-  // Recalculate distance matrix if needed
+  // Recalculate distance matrix per route cleanly
   try {
     await updateDistanceMatrix();
   } catch (err) {
